@@ -5,6 +5,7 @@ from codex_fleet.config import FleetConfig, WorkspaceConfig
 from codex_fleet.models import RunStatus, WorkItem
 from codex_fleet.orchestrator import Orchestrator
 from codex_fleet.runner import FakeRunner
+from codex_fleet.store import RunStore
 from codex_fleet.tracker import MemoryTracker
 
 
@@ -33,3 +34,22 @@ def test_orchestrator_moves_successful_item_to_human_review(tmp_path: Path) -> N
     assert result.run.status == RunStatus.HUMAN_REVIEW
     assert tracker.fetch_items_by_ids(["1"])[0].state == "Human Review"
     assert tracker.comments["1"]
+
+
+def test_orchestrator_persists_run_state(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+
+    item = WorkItem(id="1", identifier="CF-1", title="Smoke", description=None, state="Ready")
+    tracker = MemoryTracker([item], active_states=["Ready"])
+    config = FleetConfig(repo=repo, workspace=WorkspaceConfig(root=tmp_path / "workspaces")).resolved()
+    store = RunStore(tmp_path / "runs.sqlite3")
+
+    result = Orchestrator(config=config, tracker=tracker, runner=FakeRunner(), store=store).run_once()
+
+    assert result.run is not None
+    stored = store.get_run(result.run.id)
+    assert stored is not None
+    assert stored.status == "human_review"
+    assert stored.worktree_path is not None
