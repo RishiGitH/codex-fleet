@@ -102,11 +102,16 @@ def render_report(report: DoctorReport) -> str:
 
 
 def _is_git_repo(repo: Path) -> bool:
-    result = subprocess.run(
-        ["git", "rev-parse", "--is-inside-work-tree"],
-        cwd=repo,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    if not repo.exists():
+        return False
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=repo,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return False
     return result.returncode == 0 and result.stdout.strip() == "true"
