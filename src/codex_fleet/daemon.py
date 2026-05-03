@@ -7,7 +7,9 @@ from pathlib import Path
 from codex_fleet.config import FleetConfig
 from codex_fleet.factory import build_runner, build_tracker, default_store_path
 from codex_fleet.orchestrator import Orchestrator, OrchestratorResult
+from codex_fleet.runner import Runner
 from codex_fleet.store import RunStore
+from codex_fleet.tracker import Tracker
 
 
 @dataclass(frozen=True)
@@ -21,6 +23,8 @@ class FleetDaemon:
         self.config = config
         self.fake_runner = fake_runner
         self.store = RunStore(default_store_path(config.repo))
+        self.tracker: Tracker = build_tracker(config)
+        self.runner: Runner = build_runner(config, fake=fake_runner)
 
     def run(self, *, max_ticks: int | None = None, sleep_seconds: float | None = None) -> DaemonStats:
         ticks = 0
@@ -41,12 +45,10 @@ class FleetDaemon:
         return DaemonStats(ticks=ticks, dispatched=dispatched)
 
     def tick(self) -> OrchestratorResult:
-        tracker = build_tracker(self.config)
-        runner = build_runner(self.config, fake=self.fake_runner)
         return Orchestrator(
             config=self.config,
-            tracker=tracker,
-            runner=runner,
+            tracker=self.tracker,
+            runner=self.runner,
             store=self.store,
         ).run_once()
 
