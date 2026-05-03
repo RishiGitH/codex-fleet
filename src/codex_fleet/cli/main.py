@@ -7,10 +7,11 @@ from codex_fleet.budget import file_size
 from codex_fleet.config import load_config, write_default_config
 from codex_fleet.daemon import FleetDaemon
 from codex_fleet.doctor import render_report, scan_repo
-from codex_fleet.factory import build_runner, build_tracker, default_store_path
+from codex_fleet.factory import build_plane_client, build_runner, build_tracker, default_store_path
 from codex_fleet.harness import apply_harness, plan_harness
 from codex_fleet.models import WorkItem
 from codex_fleet.orchestrator import Orchestrator
+from codex_fleet.plane_bootstrap import check_plane_readiness, ensure_plane_states
 from codex_fleet.pr_flow import PrRequest, create_draft_pr
 from codex_fleet.runner import FakeRunner
 from codex_fleet.store import RunStore
@@ -87,6 +88,39 @@ def budget(repo: Path) -> None:
     for rel in ["AGENTS.md", "README.md"]:
         path = repo / rel
         console.print(f"{rel}: {file_size(path)} bytes")
+
+
+@main.command("plane-check")
+@click.option("--repo", type=click.Path(path_type=Path), default=Path.cwd())
+def plane_check(repo: Path) -> None:
+    """Check configured Plane project states and Ready work count."""
+    config = load_config(repo)
+    client = build_plane_client(config)
+    readiness = check_plane_readiness(client, config.tracker.active_states)
+    console.print(f"Plane states: {readiness.state_count}")
+    console.print(f"Candidate work items: {readiness.candidate_count}")
+    if readiness.missing_states:
+        console.print("Missing states:")
+        for state in readiness.missing_states:
+            console.print(f"- {state}")
+    else:
+        console.print("Plane workflow states are ready.")
+
+
+@main.command("plane-bootstrap")
+@click.option("--repo", type=click.Path(path_type=Path), default=Path.cwd())
+def plane_bootstrap(repo: Path) -> None:
+    """Create missing codex-fleet workflow states in Plane."""
+    config = load_config(repo)
+    client = build_plane_client(config)
+    result = ensure_plane_states(client, config.tracker.active_states)
+    if result.created_states:
+        console.print("Created states:")
+        for state in result.created_states:
+            console.print(f"- {state}")
+    else:
+        console.print("No states created.")
+    console.print(f"Plane ready: {result.readiness.ok}")
 
 
 @main.command("run-once")
