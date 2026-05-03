@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,7 +32,7 @@ def scan_repo(repo: Path) -> DoctorReport:
         if not (repo / path).exists():
             findings.append(DoctorFinding(code, severity, message, recommendation))
 
-    if not (repo / ".git").exists():
+    if not _is_git_repo(repo):
         findings.append(
             DoctorFinding(
                 "missing_git",
@@ -98,3 +99,14 @@ def render_report(report: DoctorReport) -> str:
         lines.append(f"[{finding.severity.upper()}] {finding.code}: {finding.message}")
         lines.append(f"  Recommendation: {finding.recommendation}")
     return "\n".join(lines)
+
+
+def _is_git_repo(repo: Path) -> bool:
+    result = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=repo,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result.returncode == 0 and result.stdout.strip() == "true"
