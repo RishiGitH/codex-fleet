@@ -11,6 +11,7 @@ from codex_fleet.factory import build_runner, build_tracker, default_store_path
 from codex_fleet.harness import apply_harness, plan_harness
 from codex_fleet.models import WorkItem
 from codex_fleet.orchestrator import Orchestrator
+from codex_fleet.pr_flow import PrRequest, create_draft_pr
 from codex_fleet.runner import FakeRunner
 from codex_fleet.store import RunStore
 from codex_fleet.tracker import MemoryTracker
@@ -148,6 +149,20 @@ def up(repo: Path, fake: bool, once: bool, sleep_seconds: float) -> None:
     stats = FleetDaemon(config, fake_runner=fake).run(max_ticks=max_ticks, sleep_seconds=sleep_seconds)
     console.print(f"Ticks: {stats.ticks}")
     console.print(f"Dispatched: {stats.dispatched}")
+
+
+@main.command("create-pr")
+@click.option("--repo", type=click.Path(path_type=Path), default=Path.cwd())
+@click.option("--branch", required=True)
+@click.option("--title", required=True)
+@click.option("--body", default="Created by codex-fleet.")
+@click.option("--base", default="main", show_default=True)
+def create_pr(repo: Path, branch: str, title: str, body: str, base: str) -> None:
+    """Manually push a branch and open a draft PR using local git and gh."""
+    result = create_draft_pr(
+        PrRequest(repo=repo, branch_name=branch, title=title, body=body, base_branch=base)
+    )
+    console.print(result.message)
 
 
 def _print_result(result: object) -> None:
