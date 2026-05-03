@@ -1,4 +1,4 @@
-.PHONY: install test lint doctor budget smoke local-check
+.PHONY: install test lint doctor budget smoke local-check full-local-check
 
 install:
 	python -m pip install -e '.[dev]'
@@ -16,6 +16,8 @@ budget:
 	python -m codex_fleet budget --repo .
 
 smoke:
-	python -m codex_fleet run-configured --repo . --fake
+	python -m codex_fleet up --repo . --fake --once
 
 local-check: install lint test doctor budget
+
+full-local-check: local-check smoke
