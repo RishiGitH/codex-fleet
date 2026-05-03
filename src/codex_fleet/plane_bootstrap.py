@@ -15,6 +15,28 @@ REQUIRED_STATES: tuple[str, ...] = (
     "Cancelled",
 )
 
+STATE_GROUPS: dict[str, str] = {
+    "Backlog": "backlog",
+    "Ready": "unstarted",
+    "Running": "started",
+    "Human Review": "started",
+    "Rework": "started",
+    "Done": "completed",
+    "Blocked": "cancelled",
+    "Cancelled": "cancelled",
+}
+
+STATE_COLORS: dict[str, str] = {
+    "Backlog": "#6B7280",
+    "Ready": "#3B82F6",
+    "Running": "#F59E0B",
+    "Human Review": "#8B5CF6",
+    "Rework": "#EF4444",
+    "Done": "#10B981",
+    "Blocked": "#111827",
+    "Cancelled": "#6B7280",
+}
+
 
 @dataclass(frozen=True)
 class PlaneReadiness:
@@ -22,6 +44,12 @@ class PlaneReadiness:
     missing_states: tuple[str, ...]
     state_count: int
     candidate_count: int
+
+
+@dataclass(frozen=True)
+class PlaneBootstrapResult:
+    created_states: tuple[str, ...]
+    readiness: PlaneReadiness
 
 
 def check_plane_readiness(client: PlaneClient, active_states: list[str]) -> PlaneReadiness:
@@ -43,3 +71,17 @@ def check_plane_readiness(client: PlaneClient, active_states: list[str]) -> Plan
         state_count=len(states),
         candidate_count=candidate_count,
     )
+
+
+def ensure_plane_states(client: PlaneClient, active_states: list[str]) -> PlaneBootstrapResult:
+    before = check_plane_readiness(client, active_states)
+    created: list[str] = []
+    for state in before.missing_states:
+        client.create_state(
+            name=state,
+            group=STATE_GROUPS[state],
+            color=STATE_COLORS[state],
+        )
+        created.append(state)
+    after = check_plane_readiness(client, active_states)
+    return PlaneBootstrapResult(created_states=tuple(created), readiness=after)
