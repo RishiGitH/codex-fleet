@@ -8,6 +8,7 @@ from codex_fleet.config import load_config, write_default_config
 from codex_fleet.daemon import FleetDaemon
 from codex_fleet.doctor import render_report, scan_repo
 from codex_fleet.factory import build_runner, build_tracker, default_store_path
+from codex_fleet.harness import apply_harness, plan_harness
 from codex_fleet.models import WorkItem
 from codex_fleet.orchestrator import Orchestrator
 from codex_fleet.runner import FakeRunner
@@ -35,6 +36,33 @@ def init_harness(repo: Path) -> None:
     """Create a local codex-fleet config file."""
     path = write_default_config(repo)
     console.print(f"Config ready: {path}")
+
+
+@main.command("plan-harness")
+@click.option("--repo", type=click.Path(path_type=Path), default=Path.cwd())
+def plan_harness_cmd(repo: Path) -> None:
+    """Show recommended Codex harness files for a repo."""
+    plan = plan_harness(repo)
+    if not plan.missing:
+        console.print("Harness files already exist.")
+        return
+    console.print("Missing harness files:")
+    for file in plan.missing:
+        console.print(f"- {file.path}")
+
+
+@main.command("apply-harness")
+@click.option("--repo", type=click.Path(path_type=Path), default=Path.cwd())
+@click.option("--overwrite", is_flag=True, help="Overwrite existing generated harness files.")
+def apply_harness_cmd(repo: Path, overwrite: bool) -> None:
+    """Write recommended Codex harness files into a repo."""
+    written = apply_harness(repo, overwrite=overwrite)
+    if not written:
+        console.print("No harness files written.")
+        return
+    console.print("Wrote harness files:")
+    for path in written:
+        console.print(f"- {path}")
 
 
 @main.command()
