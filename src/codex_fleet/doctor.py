@@ -80,7 +80,7 @@ def scan_repo(repo: Path) -> DoctorReport:
                 "missing_ci",
                 "info",
                 "No GitHub Actions workflow found.",
-                "Add CI before enabling auto PR creation for broader contributors.",
+                "This is expected while the project uses local-only testing; add CI later only when desired.",
             )
         )
 
