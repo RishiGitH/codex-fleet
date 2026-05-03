@@ -39,6 +39,28 @@ This uses the in-memory tracker and fake runner, creates a git worktree, writes 
 python -m codex_fleet daemon --repo . --fake --ticks 1
 ```
 
+## Main local entrypoint
+
+```bash
+python -m codex_fleet up --repo . --fake --once
+```
+
+This runs the doctor, prints config, runs one scheduler tick, and exits.
+
+## Harness generation for another repo
+
+Preview:
+
+```bash
+python -m codex_fleet plan-harness --repo /path/to/repo
+```
+
+Apply missing files:
+
+```bash
+python -m codex_fleet apply-harness --repo /path/to/repo
+```
+
 ## Real Codex App Server run
 
 Use this only after Codex CLI is installed and authenticated:
@@ -48,3 +70,14 @@ python -m codex_fleet run-configured --repo .
 ```
 
 The current runner uses the `codex app-server` command from `.codex-fleet.yml` or the default config.
+
+## Plane checks
+
+After configuring `.codex-fleet.yml` for Plane:
+
+```bash
+python -m codex_fleet plane-check --repo .
+python -m codex_fleet plane-bootstrap --repo .
+```
+
+`plane-bootstrap` creates missing workflow states in your configured Plane project.
