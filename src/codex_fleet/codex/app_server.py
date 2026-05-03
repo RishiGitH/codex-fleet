@@ -4,6 +4,7 @@ import select
 import shlex
 import subprocess
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
@@ -148,7 +149,7 @@ def _wait_for_turn(stdout: TextIO, timeout_seconds: int) -> bool:
     raise AppServerError("Timed out waiting for turn completion")
 
 
-def _read_json_lines(stdout: TextIO, timeout_seconds: int):
+def _read_json_lines(stdout: TextIO, timeout_seconds: int) -> Iterator[str]:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         remaining = max(0.0, deadline - time.monotonic())
