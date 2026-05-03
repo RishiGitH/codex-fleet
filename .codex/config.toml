@@ -1,0 +1,63 @@
+model = "gpt-5.4-mini"
+model_reasoning_effort = "medium"
+sandbox_mode = "workspace-write"
+approval_policy = "on-request"
+
+[agents]
+max_threads = 6
+max_depth = 1
+job_max_runtime_seconds = 1800
+
+[profiles.safe]
+model = "gpt-5.4-mini"
+model_reasoning_effort = "low"
+sandbox_mode = "read-only"
+approval_policy = "untrusted"
+
+[profiles.dev]
+model = "gpt-5.4-mini"
+model_reasoning_effort = "medium"
+sandbox_mode = "workspace-write"
+approval_policy = "on-request"
+
+[profiles.orchestrate]
+model = "gpt-5.5"
+model_reasoning_effort = "high"
+sandbox_mode = "workspace-write"
+approval_policy = "on-request"
+
+[profiles.review]
+model = "gpt-5.5"
+model_reasoning_effort = "high"
+sandbox_mode = "read-only"
+approval_policy = "on-request"
+
+[profiles.ci]
+model = "gpt-5.4-mini"
+model_reasoning_effort = "low"
+sandbox_mode = "read-only"
+approval_policy = "never"
+
+[agents.code_scout]
+description = "Read-only explorer for locating files, tests, symbols, and current behavior before implementation."
+config_file = "agents/code-scout.toml"
+
+[agents.architect]
+description = "Architecture reviewer for orchestration, state machines, tracker adapters, and safety boundaries."
+config_file = "agents/architect.toml"
+
+[agents.implementer]
+description = "Implementation agent for approved scoped changes with tests."
+config_file = "agents/implementer.toml"
+
+[agents.harness_reviewer]
+description = "Reviewer that checks whether changes keep the repo easy for Codex to work in."
+config_file = "agents/harness-reviewer.toml"
+
+[agents.security_reviewer]
+description = "Security reviewer for tokens, shell commands, workspace isolation, Docker mounts, and GitHub writes."
+config_file = "agents/security-reviewer.toml"
+
+[agents.token_reviewer]
+description = "Reviewer for prompt, log, skill, and guidance bloat."
+config_file = "agents/token-reviewer.toml"
