@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+python -m codex_fleet doctor --repo .
+python -m codex_fleet budget --repo .
