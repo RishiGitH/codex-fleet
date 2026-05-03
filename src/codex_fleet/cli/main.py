@@ -5,6 +5,7 @@ from rich.console import Console
 
 from codex_fleet.budget import file_size
 from codex_fleet.config import load_config, write_default_config
+from codex_fleet.daemon import FleetDaemon
 from codex_fleet.doctor import render_report, scan_repo
 from codex_fleet.factory import build_runner, build_tracker, default_store_path
 from codex_fleet.models import WorkItem
@@ -88,6 +89,19 @@ def run_configured(repo: Path, fake: bool) -> None:
     store = RunStore(default_store_path(config.repo))
     result = Orchestrator(config=config, tracker=tracker, runner=runner, store=store).run_once()
     _print_result(result)
+
+
+@main.command("daemon")
+@click.option("--repo", type=click.Path(path_type=Path), default=Path.cwd())
+@click.option("--fake", is_flag=True, help="Use fake runner instead of real Codex App Server.")
+@click.option("--ticks", type=int, default=None, help="Optional max ticks for tests or smoke runs.")
+@click.option("--sleep", "sleep_seconds", type=float, default=5.0, show_default=True)
+def daemon(repo: Path, fake: bool, ticks: int | None, sleep_seconds: float) -> None:
+    """Run the polling loop."""
+    config = load_config(repo)
+    stats = FleetDaemon(config, fake_runner=fake).run(max_ticks=ticks, sleep_seconds=sleep_seconds)
+    console.print(f"Ticks: {stats.ticks}")
+    console.print(f"Dispatched: {stats.dispatched}")
 
 
 def _print_result(result: object) -> None:
