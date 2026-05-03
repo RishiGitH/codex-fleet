@@ -25,7 +25,7 @@ That command will eventually:
 
 Phase 1 foundation is implemented as a contributor-friendly Python package and Codex-native repo harness. The first phase includes:
 
-- CLI skeleton with `doctor`, `status`, `init-harness`, `run-once`, and `token-budget` commands.
+- CLI skeleton with `doctor`, `status`, `init-harness`, `run-once`, and `budget` commands.
 - Repo doctor scanner for agent-readiness checks.
 - Tracker abstraction with in-memory tracker and Plane REST client skeleton.
 - Symphony-style orchestrator core that claims one issue, prepares a worktree, runs a runner, and updates state.
@@ -58,8 +58,11 @@ You can also run:
 
 ```bash
 python -m codex_fleet status --repo .
-python -m codex_fleet token-budget --repo .
+python -m codex_fleet budget --repo .
+python -m codex_fleet run-once --repo .
 ```
+
+`run-once` is a Phase 1 smoke command. It uses an in-memory work item and fake runner to exercise the orchestration loop without Plane or real Codex.
 
 ## Development principles
 
