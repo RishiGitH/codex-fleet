@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import select
 import shlex
 import subprocess
 import time
@@ -130,11 +131,7 @@ def _send(stdin: TextIO, line: str) -> None:
 
 
 def _read_response(stdout: TextIO, request_id: int, timeout_seconds: int) -> dict[str, object]:
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
-        line = stdout.readline()
-        if not line:
-            continue
+    for line in _read_json_lines(stdout, timeout_seconds):
         payload = parse_json_line(line)
         if payload.get("id") == request_id:
             return payload
@@ -142,17 +139,25 @@ def _read_response(stdout: TextIO, request_id: int, timeout_seconds: int) -> dic
 
 
 def _wait_for_turn(stdout: TextIO, timeout_seconds: int) -> bool:
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
-        line = stdout.readline()
-        if not line:
-            continue
+    for line in _read_json_lines(stdout, timeout_seconds):
         payload = parse_json_line(line)
         if is_turn_completed(payload):
             return True
         if is_turn_failed(payload):
             return False
     raise AppServerError("Timed out waiting for turn completion")
+
+
+def _read_json_lines(stdout: TextIO, timeout_seconds: int):
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        remaining = max(0.0, deadline - time.monotonic())
+        ready, _, _ = select.select([stdout], [], [], min(remaining, 1.0))
+        if not ready:
+            continue
+        line = stdout.readline()
+        if line:
+            yield line
 
 
 def _terminate_process(process: subprocess.Popen[str]) -> None:
