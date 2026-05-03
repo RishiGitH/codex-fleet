@@ -1,0 +1,15 @@
+services:
+  codex-fleet:
+    build:
+      context: ..
+      dockerfile: docker/codex-fleet.Dockerfile
+    working_dir: /workspace
+    volumes:
+      - ..:/workspace
+      - codex-fleet-workspaces:/root/.codex-fleet/workspaces
+    environment:
+      CODEX_FLEET_WORKSPACE_ROOT: /root/.codex-fleet/workspaces
+    command: ["up", "--repo", "/workspace", "--fake", "--once"]
+
+volumes:
+  codex-fleet-workspaces:
