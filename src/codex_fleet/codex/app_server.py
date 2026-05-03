@@ -7,7 +7,7 @@ import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TextIO
+from typing import Any, TextIO
 
 from codex_fleet.codex.protocol import (
     IdSequence,
@@ -131,7 +131,7 @@ def _send(stdin: TextIO, line: str) -> None:
     stdin.flush()
 
 
-def _read_response(stdout: TextIO, request_id: int, timeout_seconds: int) -> dict[str, object]:
+def _read_response(stdout: TextIO, request_id: int, timeout_seconds: int) -> dict[str, Any]:
     for line in _read_json_lines(stdout, timeout_seconds):
         payload = parse_json_line(line)
         if payload.get("id") == request_id:
