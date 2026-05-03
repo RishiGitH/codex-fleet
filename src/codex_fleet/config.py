@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field
@@ -46,6 +47,10 @@ class FleetConfig(BaseModel):
     def resolved(self) -> "FleetConfig":
         self.repo = self.repo.expanduser().resolve()
         self.workspace.root = self.workspace.root.expanduser().resolve()
+        self.tracker.plane_base_url = resolve_env_ref(self.tracker.plane_base_url)
+        self.tracker.plane_api_key = resolve_env_ref(self.tracker.plane_api_key)
+        self.tracker.plane_workspace_slug = resolve_env_ref(self.tracker.plane_workspace_slug)
+        self.tracker.plane_project_id = resolve_env_ref(self.tracker.plane_project_id)
         return self
 
 
@@ -60,7 +65,10 @@ def load_config(repo: Path, config_path: Path | None = None) -> FleetConfig:
         return FleetConfig(repo=repo).resolved()
 
     raw = yaml.safe_load(path.read_text()) or {}
+    if not isinstance(raw, dict):
+        raise ValueError(".codex-fleet.yml must contain a mapping")
     raw.setdefault("repo", str(repo))
+    raw = _resolve_repo_relative_paths(raw, path.parent)
     return FleetConfig.model_validate(raw).resolved()
 
 
@@ -86,3 +94,22 @@ def write_default_config(repo: Path, path: Path | None = None) -> Path:
         "  sandbox_mode: workspace-write\n"
     )
     return target
+
+
+def resolve_env_ref(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if value.startswith("$") and len(value) > 1:
+        return os.getenv(value[1:])
+    return value
+
+
+def _resolve_repo_relative_paths(raw: dict[str, Any], config_dir: Path) -> dict[str, Any]:
+    repo_value = raw.get("repo")
+    if isinstance(repo_value, str) and repo_value not in {"", "."}:
+        repo_path = Path(repo_value).expanduser()
+        if not repo_path.is_absolute():
+            raw["repo"] = str((config_dir / repo_path).resolve())
+    elif repo_value == ".":
+        raw["repo"] = str(config_dir.resolve())
+    return raw
