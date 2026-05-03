@@ -23,21 +23,25 @@ def build_tracker(config: FleetConfig) -> Tracker:
         return MemoryTracker([item], active_states=config.tracker.active_states)
 
     if config.tracker.kind == "plane":
-        settings = PlaneSettings(
-            base_url=_required(config.tracker.plane_base_url or os.getenv("PLANE_BASE_URL"), "PLANE_BASE_URL"),
-            api_key=_required(config.tracker.plane_api_key or os.getenv("PLANE_API_KEY"), "PLANE_API_KEY"),
-            workspace_slug=_required(
-                config.tracker.plane_workspace_slug or os.getenv("PLANE_WORKSPACE_SLUG"),
-                "PLANE_WORKSPACE_SLUG",
-            ),
-            project_id=_required(
-                config.tracker.plane_project_id or os.getenv("PLANE_PROJECT_ID"),
-                "PLANE_PROJECT_ID",
-            ),
-        )
-        return PlaneTracker(PlaneClient(settings), active_states=config.tracker.active_states)
+        return PlaneTracker(build_plane_client(config), active_states=config.tracker.active_states)
 
     raise ValueError(f"Unsupported tracker kind: {config.tracker.kind}")
+
+
+def build_plane_client(config: FleetConfig) -> PlaneClient:
+    settings = PlaneSettings(
+        base_url=_required(config.tracker.plane_base_url or os.getenv("PLANE_BASE_URL"), "PLANE_BASE_URL"),
+        api_key=_required(config.tracker.plane_api_key or os.getenv("PLANE_API_KEY"), "PLANE_API_KEY"),
+        workspace_slug=_required(
+            config.tracker.plane_workspace_slug or os.getenv("PLANE_WORKSPACE_SLUG"),
+            "PLANE_WORKSPACE_SLUG",
+        ),
+        project_id=_required(
+            config.tracker.plane_project_id or os.getenv("PLANE_PROJECT_ID"),
+            "PLANE_PROJECT_ID",
+        ),
+    )
+    return PlaneClient(settings)
 
 
 def build_runner(config: FleetConfig, *, fake: bool = False) -> Runner:
