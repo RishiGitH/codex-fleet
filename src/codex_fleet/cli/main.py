@@ -132,6 +132,24 @@ def daemon(repo: Path, fake: bool, ticks: int | None, sleep_seconds: float) -> N
     console.print(f"Dispatched: {stats.dispatched}")
 
 
+@main.command("up")
+@click.option("--repo", type=click.Path(path_type=Path), default=Path.cwd())
+@click.option("--fake", is_flag=True, help="Use fake runner instead of real Codex App Server.")
+@click.option("--once", is_flag=True, help="Run one tick and exit.")
+@click.option("--sleep", "sleep_seconds", type=float, default=5.0, show_default=True)
+def up(repo: Path, fake: bool, once: bool, sleep_seconds: float) -> None:
+    """Main local entrypoint. Runs doctor, shows config, then starts the loop."""
+    config = load_config(repo)
+    report = scan_repo(config.repo)
+    console.print(render_report(report))
+    console.print(f"Tracker: {config.tracker.kind}")
+    console.print(f"Workspace root: {config.workspace.root}")
+    max_ticks = 1 if once else None
+    stats = FleetDaemon(config, fake_runner=fake).run(max_ticks=max_ticks, sleep_seconds=sleep_seconds)
+    console.print(f"Ticks: {stats.ticks}")
+    console.print(f"Dispatched: {stats.dispatched}")
+
+
 def _print_result(result: object) -> None:
     message = getattr(result, "message", "")
     console.print(message)
