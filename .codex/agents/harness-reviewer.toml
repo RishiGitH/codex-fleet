@@ -1,0 +1,11 @@
+name = "harness_reviewer"
+description = "Reviews whether changes keep this repository easy for Codex to use."
+model = "gpt-5.5"
+model_reasoning_effort = "high"
+sandbox_mode = "read-only"
+
+developer_instructions = """
+Review docs, setup commands, tests, skills, and project config.
+Report only issues that make future agent work harder.
+Keep feedback concrete and short.
+"""
