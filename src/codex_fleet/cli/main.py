@@ -6,9 +6,11 @@ from rich.console import Console
 from codex_fleet.budget import file_size
 from codex_fleet.config import load_config, write_default_config
 from codex_fleet.doctor import render_report, scan_repo
+from codex_fleet.factory import build_runner, build_tracker, default_store_path
 from codex_fleet.models import WorkItem
 from codex_fleet.orchestrator import Orchestrator
 from codex_fleet.runner import FakeRunner
+from codex_fleet.store import RunStore
 from codex_fleet.tracker import MemoryTracker
 
 console = Console()
@@ -44,6 +46,7 @@ def status(repo: Path) -> None:
     console.print(f"Tracker: {config.tracker.kind}")
     console.print(f"Workspace root: {config.workspace.root}")
     console.print(f"Readiness: {report.score}/100")
+    console.print(f"Run store: {default_store_path(config.repo)}")
 
 
 @main.command("budget")
@@ -71,11 +74,30 @@ def run_once(repo: Path) -> None:
     )
     tracker = MemoryTracker([item], active_states=config.tracker.active_states)
     result = Orchestrator(config=config, tracker=tracker, runner=FakeRunner()).run_once()
-    console.print(result.message)
-    if result.run is not None:
-        console.print(f"Run: {result.run.id}")
-        console.print(f"Status: {result.run.status.value}")
-        console.print(f"Worktree: {result.run.worktree_path}")
+    _print_result(result)
+
+
+@main.command("run-configured")
+@click.option("--repo", type=click.Path(path_type=Path), default=Path.cwd())
+@click.option("--fake", is_flag=True, help="Use fake runner instead of real Codex App Server.")
+def run_configured(repo: Path, fake: bool) -> None:
+    """Run one configured work item using .codex-fleet.yml."""
+    config = load_config(repo)
+    tracker = build_tracker(config)
+    runner = build_runner(config, fake=fake)
+    store = RunStore(default_store_path(config.repo))
+    result = Orchestrator(config=config, tracker=tracker, runner=runner, store=store).run_once()
+    _print_result(result)
+
+
+def _print_result(result: object) -> None:
+    message = getattr(result, "message", "")
+    console.print(message)
+    run = getattr(result, "run", None)
+    if run is not None:
+        console.print(f"Run: {run.id}")
+        console.print(f"Status: {run.status.value}")
+        console.print(f"Worktree: {run.worktree_path}")
 
 
 if __name__ == "__main__":
