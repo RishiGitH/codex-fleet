@@ -59,10 +59,7 @@ def normalize_plane_item(raw: dict[str, Any]) -> WorkItem:
     sequence = raw.get("sequence_id") or raw.get("identifier") or raw.get("id")
     state = raw.get("state_detail", {}).get("name") or raw.get("state", "Backlog")
     priority = _priority_to_int(raw.get("priority"))
-    labels = tuple(
-        str(label.get("name", label)).lower()
-        for label in raw.get("label_details", raw.get("labels", []))
-    )
+    labels = tuple(_normalize_label(label) for label in raw.get("label_details", raw.get("labels", [])))
     return WorkItem(
         id=str(raw["id"]),
         identifier=f"{project_identifier}-{sequence}",
@@ -74,6 +71,12 @@ def normalize_plane_item(raw: dict[str, Any]) -> WorkItem:
         labels=labels,
         raw=raw,
     )
+
+
+def _normalize_label(label: Any) -> str:
+    if isinstance(label, dict):
+        return str(label.get("name") or label.get("id") or "").lower()
+    return str(label).lower()
 
 
 def _priority_to_int(value: Any) -> int | None:
