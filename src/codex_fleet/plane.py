@@ -47,6 +47,20 @@ class PlaneClient:
             return payload
         raise TrackerError(f"Unexpected Plane states response: {type(payload).__name__}")
 
+    def create_state(self, name: str, group: str, color: str = "#6B7280") -> dict[str, Any]:
+        path = f"/api/v1/workspaces/{self.settings.workspace_slug}/projects/{self.settings.project_id}/states/"
+        with httpx.Client(timeout=self.timeout) as client:
+            response = client.post(
+                self._url(path),
+                headers=self.headers,
+                json={"name": name, "group": group, "color": color},
+            )
+            response.raise_for_status()
+            payload = response.json()
+        if not isinstance(payload, dict):
+            raise TrackerError(f"Unexpected Plane create state response: {type(payload).__name__}")
+        return payload
+
     def update_work_item(self, item_id: str, payload: dict[str, Any]) -> None:
         path = f"/api/v1/workspaces/{self.settings.workspace_slug}/projects/{self.settings.project_id}/work-items/{item_id}/"
         with httpx.Client(timeout=self.timeout) as client:
