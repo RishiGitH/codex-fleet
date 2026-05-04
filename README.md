@@ -4,6 +4,41 @@
 
 codex-fleet is a local-first project for running Codex work from a tracker board. It combines a Plane-compatible tracker adapter, a Symphony-style orchestration loop, isolated git worktrees, a Codex App Server runner boundary, and a repo-hardening doctor.
 
+The goal is simple: one command should give a developer a local agent workflow for a repo.
+
+## One-command demo
+
+```bash
+git clone https://github.com/RishiGitH/codex-fleet.git
+cd codex-fleet
+make up
+```
+
+This creates a local venv, installs codex-fleet, runs the repo doctor, and executes one fake agent work item through the scheduler. It requires no Plane account and no Codex credentials.
+
+## Local Plane setup
+
+```bash
+make plane-up
+```
+
+This wraps Plane's official self-host installer instead of asking users to manually bring Plane Cloud credentials. After Plane is installed and running, create a local Plane account, project, and API key.
+
+Then configure codex-fleet:
+
+```bash
+cp examples/codex-fleet.plane.yml .codex-fleet.yml
+export PLANE_BASE_URL="http://localhost:3000"
+export PLANE_API_KEY="your-local-plane-key"
+export PLANE_WORKSPACE_SLUG="your-workspace"
+export PLANE_PROJECT_ID="your-project-id"
+python -m codex_fleet plane-check --repo .
+python -m codex_fleet plane-bootstrap --repo .
+python -m codex_fleet run-configured --repo . --fake
+```
+
+Remove `--fake` only after Codex CLI is installed and authenticated.
+
 ## Current status
 
 The repo now has a runnable local MVP foundation:
@@ -13,6 +48,7 @@ The repo now has a runnable local MVP foundation:
 - Harness planner and writer.
 - Memory tracker for smoke tests.
 - Plane REST adapter with state-name resolution.
+- Plane readiness and workflow state bootstrap helpers.
 - Worktree manager.
 - Fake runner for deterministic local tests.
 - Codex App Server JSON-RPC runner boundary.
@@ -21,42 +57,42 @@ The repo now has a runnable local MVP foundation:
 - Manual draft PR helper boundary.
 - Codex project config, subagents, and skills.
 - Local tests and local check scripts.
+- No GitHub Actions CI. Run tests locally.
 
-There is no GitHub Actions CI. Run tests locally.
-
-## Quick start
+## Useful commands
 
 ```bash
-git clone https://github.com/RishiGitH/codex-fleet.git
-cd codex-fleet
-python -m venv .venv
-source .venv/bin/activate
-pip install -e '.[dev]'
 make local-check
+make full-local-check
+make docker-up
+python -m codex_fleet up --repo . --fake --once
+python -m codex_fleet plan-harness --repo /path/to/repo
+python -m codex_fleet apply-harness --repo /path/to/repo
 ```
 
-Try the local fake flow:
+## npx-style launcher
+
+This repo includes a Node launcher for local development:
 
 ```bash
-python -m codex_fleet up --repo . --fake --once
+node scripts/codex-fleet-npx.js up --fake --once
 ```
 
-More instructions:
+After publishing to npm, the intended command is:
 
-- `docs/local-testing.md`
-- `docs/plane-setup.md`
-- `docs/architecture.md`
-- `docs/product-plan.md`
+```bash
+npx codex-fleet up --fake --once
+```
 
 ## Why not fork Plane or vendor Symphony?
 
-Plane is used as an external service through its API. We do not fork or vendor Plane in this repo for the MVP.
+Plane is used as an external local service through its API. We do not fork or vendor Plane in this repo for the MVP.
 
 OpenAI Symphony is used as an architecture reference: poll tracker, isolate workspaces, run a coding agent, track state, and return work for human review. codex-fleet implements a lean Python version.
 
 ## Roadmap
 
-- Plane bootstrap helper.
+- Fully automate the Plane local project/key bootstrap after Plane exposes a stable non-interactive path.
 - Live Plane integration test on your machine.
 - Real Codex App Server run test on your machine.
 - PR link comments back to Plane.
