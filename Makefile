@@ -1,4 +1,4 @@
-.PHONY: install test lint doctor budget smoke local-check full-local-check up docker-up docker-down
+.PHONY: install test lint doctor budget smoke local-check full-local-check up plane-up docker-up docker-down
 
 install:
 	python -m pip install -e '.[dev]'
@@ -19,6 +19,9 @@ smoke:
 	python -m codex_fleet up --repo . --fake --once
 
 up: install smoke
+
+plane-up:
+	bash scripts/plane-up
 
 local-check: install lint test doctor budget
 
