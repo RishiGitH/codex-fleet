@@ -1,51 +1,77 @@
 # Plane setup
 
-codex-fleet uses Plane as an external tracker/board. It does not vendor or fork Plane.
+codex-fleet is designed to use Plane locally by default. Users should not need Plane Cloud credits or a hosted Plane account to try the product.
 
-## Option A: existing Plane instance
+## Instant demo without Plane
 
-Create or choose a Plane workspace and project, then create these states:
-
-- Backlog
-- Ready
-- Running
-- Human Review
-- Rework
-- Done
-- Blocked
-- Cancelled
-
-Create an API key in Plane and configure:
+For a zero-credential demo:
 
 ```bash
-export PLANE_BASE_URL="https://your-plane.example.com"
-export PLANE_API_KEY="..."
+make up
+```
+
+This runs codex-fleet with the memory tracker and fake runner.
+
+## Local Plane setup
+
+Start Plane locally with:
+
+```bash
+make plane-up
+```
+
+This wrapper downloads and runs Plane's official self-host setup script under `.codex-fleet/plane-selfhost/`.
+
+Plane's installer is interactive. The first time, choose install. After install, choose start.
+
+After Plane is running:
+
+1. Open the local Plane URL shown by the installer.
+2. Create a local account.
+3. Create a workspace and project.
+4. Create a Plane API key.
+5. Copy `examples/codex-fleet.plane.yml` to `.codex-fleet.yml`.
+6. Export local Plane values.
+
+```bash
+cp examples/codex-fleet.plane.yml .codex-fleet.yml
+export PLANE_BASE_URL="http://localhost:3000"
+export PLANE_API_KEY="your-local-key"
 export PLANE_WORKSPACE_SLUG="your-workspace"
 export PLANE_PROJECT_ID="your-project-id"
 ```
 
-Then set `.codex-fleet.yml`:
+Check the Plane project:
 
-```yaml
-tracker:
-  kind: plane
-  active_states: [Ready, Running, Rework]
-  handoff_states: [Human Review]
-  terminal_states: [Done, Cancelled]
+```bash
+python -m codex_fleet plane-check --repo .
 ```
 
-Run one fake tick first:
+Create missing workflow states if you approve:
+
+```bash
+python -m codex_fleet plane-bootstrap --repo .
+```
+
+Run the Plane loop with the fake runner first:
 
 ```bash
 python -m codex_fleet run-configured --repo . --fake
 ```
 
-## Option B: self-host Plane
+Then remove `--fake` only after Codex CLI is installed and authenticated:
 
-Use Plane's official self-hosting docs and setup script. codex-fleet will add a helper later, but the safe MVP path is to connect to a working Plane instance through the API first.
+```bash
+python -m codex_fleet run-configured --repo .
+```
+
+## Existing Plane instance
+
+You can also connect to any existing self-hosted or cloud Plane instance by setting the same environment variables above.
 
 ## Notes
 
 - codex-fleet targets Plane work items, not deprecated issue endpoints.
 - The daemon owns critical state transitions.
+- Plane state creation is explicit through `plane-bootstrap`; codex-fleet does not mutate Plane projects silently.
 - Codex agents may later use Plane MCP for convenience, but the scheduler uses REST for deterministic behavior.
