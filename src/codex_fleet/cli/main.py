@@ -27,6 +27,32 @@ def main() -> None:
 
 @main.command()
 @click.option("--repo", type=click.Path(path_type=Path), default=Path.cwd())
+@click.option("--apply", "apply_files", is_flag=True, help="Write missing harness files.")
+def bootstrap(repo: Path, apply_files: bool) -> None:
+    """Prepare a repo for codex-fleet and print the next command."""
+    config_path = write_default_config(repo)
+    console.print(f"Config ready: {config_path}")
+    report = scan_repo(repo)
+    console.print(render_report(report))
+    plan = plan_harness(repo)
+    if plan.missing:
+        console.print("Missing harness files:")
+        for file in plan.missing:
+            console.print(f"- {file.path}")
+        if apply_files:
+            written = apply_harness(repo)
+            console.print("Wrote harness files:")
+            for path in written:
+                console.print(f"- {path}")
+        else:
+            console.print("Run again with --apply to write them.")
+    else:
+        console.print("Harness files already exist.")
+    console.print("Next: python -m codex_fleet up --repo . --fake --once")
+
+
+@main.command()
+@click.option("--repo", type=click.Path(path_type=Path), default=Path.cwd())
 def doctor(repo: Path) -> None:
     """Scan a repository for readiness."""
     console.print(render_report(scan_repo(repo)))
