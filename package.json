@@ -5,6 +5,16 @@
   "bin": {
     "codex-fleet": "scripts/codex-fleet-npx.js"
   },
+  "files": [
+    "README.md",
+    "pyproject.toml",
+    "src",
+    "scripts",
+    "docs",
+    "examples",
+    "docker",
+    "Makefile"
+  ],
   "scripts": {
     "smoke": "node scripts/codex-fleet-npx.js up --fake --once"
   },
