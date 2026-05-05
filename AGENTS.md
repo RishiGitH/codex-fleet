@@ -45,10 +45,16 @@ Run the repo doctor:
 python -m codex_fleet doctor --repo .
 ```
 
-Run token budget check:
+Run context budget check:
 
 ```bash
-python -m codex_fleet token-budget --repo .
+python -m codex_fleet budget --repo .
+```
+
+Run local smoke flow:
+
+```bash
+python -m codex_fleet up --repo . --fake --once
 ```
 
 ## Development rules
