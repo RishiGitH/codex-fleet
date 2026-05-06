@@ -105,10 +105,11 @@ class PlaneClient:
         for project in projects:
             if external_id and project.get("external_source") == "codex-fleet" and project.get("external_id") == external_id:
                 return project
-        target_name = plane_project_name(name).lower()
-        for project in projects:
-            if str(project.get("name", "")).strip().lower() == target_name:
-                return project
+        if external_id is None:
+            target_name = plane_project_name(name).lower()
+            for project in projects:
+                if str(project.get("name", "")).strip().lower() == target_name:
+                    return project
 
         used_identifiers = {str(project.get("identifier", "")).strip().upper() for project in projects}
         for identifier in plane_project_identifier_candidates(identifier_seed):

@@ -86,6 +86,44 @@ def test_plane_project_name_removes_forbidden_characters() -> None:
     assert plane_project_name("!!!") == "Codex Fleet Project"
 
 
+def test_plane_ensure_project_does_not_reuse_same_name_when_external_id_differs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = PlaneClient(
+        PlaneSettings(
+            base_url="http://plane.local",
+            api_key="test-key",
+            workspace_slug="codex-fleet",
+            project_id="project-id",
+        )
+    )
+    monkeypatch.setattr(
+        client,
+        "list_projects",
+        lambda: [
+            {
+                "id": "existing-project",
+                "name": "App",
+                "identifier": "APP",
+                "external_source": "codex-fleet",
+                "external_id": "/tmp/first-app",
+            }
+        ],
+    )
+    created: list[dict[str, str | None]] = []
+
+    def fake_create_project(*, name: str, identifier: str, external_id: str | None = None) -> dict[str, str | None]:
+        created.append({"name": name, "identifier": identifier, "external_id": external_id})
+        return {"id": "created-project", "name": name, "identifier": identifier, "external_id": external_id}
+
+    monkeypatch.setattr(client, "create_project", fake_create_project)
+
+    project = client.ensure_project(name="App", identifier_seed="App", external_id="/tmp/second-app")
+
+    assert project["id"] == "created-project"
+    assert created == [{"name": "App", "identifier": "APP2", "external_id": "/tmp/second-app"}]
+
+
 def test_plane_client_retries_transient_api_gateway_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = 0
 
