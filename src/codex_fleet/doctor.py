@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import shlex
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,7 +26,7 @@ class DoctorReport:
         return self.score >= 80 and not any(f.severity == "error" for f in self.findings)
 
 
-def scan_repo(repo: Path) -> DoctorReport:
+def scan_repo(repo: Path, *, codex_command: str = "codex exec") -> DoctorReport:
     repo = repo.expanduser().resolve()
     findings: list[DoctorFinding] = []
 
@@ -84,6 +86,19 @@ def scan_repo(repo: Path) -> DoctorReport:
             )
         )
 
+    codex_binary = _command_binary(codex_command)
+    if codex_binary and shutil.which(codex_binary) is None:
+        findings.append(
+            DoctorFinding(
+                "missing_codex_cli",
+                "info",
+                f"Configured Codex command binary was not found: {codex_binary}",
+                "Install and authenticate Codex CLI before running without --fake. The fake demo does not require it.",
+            )
+        )
+    elif codex_binary:
+        findings.extend(_codex_cli_preflight_findings(codex_command))
+
     penalty = sum({"error": 35, "warning": 12, "info": 5}[f.severity] for f in findings)
     score = max(0, 100 - penalty)
     return DoctorReport(repo=repo, score=score, findings=tuple(findings))
@@ -115,3 +130,107 @@ def _is_git_repo(repo: Path) -> bool:
     except OSError:
         return False
     return result.returncode == 0 and result.stdout.strip() == "true"
+
+
+def _command_binary(command: str) -> str | None:
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return None
+    return parts[0] if parts else None
+
+
+def _codex_cli_preflight_findings(command: str) -> list[DoctorFinding]:
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return [
+            DoctorFinding(
+                "invalid_codex_command",
+                "warning",
+                "Configured Codex command could not be parsed.",
+                "Set codex.command to a valid argv-style command such as `codex exec`.",
+            )
+        ]
+    if not parts or Path(parts[0]).name != "codex" or (len(parts) > 1 and parts[1] != "exec"):
+        return []
+
+    findings: list[DoctorFinding] = []
+    try:
+        version = subprocess.run(
+            [parts[0], "--version"],
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        version = None
+    if version is not None and version.returncode != 0:
+        findings.append(
+            DoctorFinding(
+                "codex_cli_version_failed",
+                "info",
+                "Codex CLI version check failed.",
+                "Run `codex --version` locally before using the real runner.",
+            )
+        )
+
+    try:
+        exec_help = subprocess.run(
+            [*parts, "--help"],
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        exec_help = None
+    if exec_help is None or exec_help.returncode != 0:
+        findings.append(
+            DoctorFinding(
+                "codex_exec_help_failed",
+                "warning",
+                "Codex exec help could not be inspected.",
+                "Run `codex exec --help` and confirm it supports `--cd`, `--sandbox`, config overrides, and stdin prompts.",
+            )
+        )
+    else:
+        help_text = f"{exec_help.stdout}\n{exec_help.stderr}"
+        missing = [
+            flag
+            for flag in ("--cd", "--sandbox", "--config")
+            if flag not in help_text
+        ]
+        if "stdin" not in help_text.lower():
+            missing.append("stdin prompt")
+        if missing:
+            findings.append(
+                DoctorFinding(
+                    "codex_exec_contract_changed",
+                    "warning",
+                    "Codex exec CLI contract appears different from codex-fleet's runner expectations.",
+                    "Update Codex CLI or codex-fleet runner support. Missing support: " + ", ".join(missing),
+                )
+            )
+
+    try:
+        login_status = subprocess.run(
+            [parts[0], "login", "status"],
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        login_status = None
+    if login_status is None or login_status.returncode != 0:
+        findings.append(
+            DoctorFinding(
+                "codex_cli_not_authenticated",
+                "info",
+                "Codex CLI authentication was not confirmed.",
+                "Run `codex login status` and `codex login` before using the real runner. Keep using `--fake` for demos.",
+            )
+        )
+    return findings

@@ -18,6 +18,17 @@ def test_load_config_resolves_repo_relative_to_config(tmp_path: Path) -> None:
     config = load_config(tmp_path, config_path=config_path)
 
     assert config.repo == tmp_path.resolve()
+    assert config.workspace.root == (tmp_path / ".codex-fleet" / "workspaces").resolve()
+    assert config.codex.stream_logs is True
+
+
+def test_load_config_resolves_workspace_relative_to_repo(tmp_path: Path) -> None:
+    config_path = tmp_path / ".codex-fleet.yml"
+    config_path.write_text("repo: .\nworkspace:\n  root: .codex-fleet/workspaces\n")
+
+    config = load_config(tmp_path, config_path=config_path)
+
+    assert config.workspace.root == (tmp_path / ".codex-fleet" / "workspaces").resolve()
 
 
 def test_load_config_resolves_plane_env(monkeypatch, tmp_path: Path) -> None:
@@ -37,3 +48,12 @@ def test_load_config_resolves_plane_env(monkeypatch, tmp_path: Path) -> None:
 
     assert config.tracker.plane_base_url == "http://plane.local"
     assert config.tracker.plane_api_key == "literal-key"
+
+
+def test_load_config_infers_legacy_app_server_runner(tmp_path: Path) -> None:
+    config_path = tmp_path / ".codex-fleet.yml"
+    config_path.write_text("repo: .\ncodex:\n  command: codex app-server\n")
+
+    config = load_config(tmp_path, config_path=config_path)
+
+    assert config.codex.runner == "app-server"

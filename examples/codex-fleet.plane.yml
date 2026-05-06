@@ -1,7 +1,7 @@
 repo: .
 tracker:
   kind: plane
-  active_states: [Ready, Running, Rework]
+  active_states: [Ready]
   handoff_states: [Human Review]
   terminal_states: [Done, Cancelled]
   plane_base_url: $PLANE_BASE_URL
@@ -11,10 +11,18 @@ tracker:
 agent:
   max_concurrent_agents: 1
 workspace:
-  root: ~/.codex-fleet/workspaces
+  root: .codex-fleet/workspaces
 codex:
-  command: codex app-server
+  runner: cli
+  command: codex exec
   approval_policy: on-request
   sandbox_mode: workspace-write
   turn_timeout_ms: 3600000
   stall_timeout_ms: 300000
+token:
+  default_doc_limit: 8000
+  skill_limit: 4000
+  raw_artifact_retention: keep
+  enable_rtk: false
+  enable_caveman: false
+  enable_repomix: false

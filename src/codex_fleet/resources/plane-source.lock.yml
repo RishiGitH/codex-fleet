@@ -1,0 +1,8 @@
+source_url: https://github.com/makeplane/plane.git
+ref: 4c1bdd1d625fa3f1141e8af9c15423946472069e
+patch_resource: plane-codex-fleet.patch
+strategy: runtime-clone-with-bundled-patch
+notes: >
+  Local-first Plane source pin for codex-fleet. Runtime installs clone this
+  exact upstream Plane commit and apply the bundled codex-fleet patch until a
+  public codex-fleet Plane fork or submodule is available.

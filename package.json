@@ -8,10 +8,13 @@
   "files": [
     "README.md",
     "pyproject.toml",
-    "src",
+    "src/**/*.py",
+    "src/**/*.patch",
     "scripts",
     "docs",
     "examples",
+    "assets",
+    "patches",
     "docker",
     "Makefile"
   ],

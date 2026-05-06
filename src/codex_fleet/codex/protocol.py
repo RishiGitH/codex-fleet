@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 
 class ProtocolError(RuntimeError):
@@ -109,14 +109,14 @@ def extract_thread_id(result: dict[str, Any]) -> str:
     thread = result.get("thread")
     if not isinstance(thread, dict) or not isinstance(thread.get("id"), str):
         raise ProtocolError("thread/start response missing thread.id")
-    return thread["id"]
+    return cast(str, thread["id"])
 
 
 def extract_turn_id(result: dict[str, Any]) -> str:
     turn = result.get("turn")
     if not isinstance(turn, dict) or not isinstance(turn.get("id"), str):
         raise ProtocolError("turn/start response missing turn.id")
-    return turn["id"]
+    return cast(str, turn["id"])
 
 
 def is_turn_completed(payload: dict[str, Any]) -> bool:

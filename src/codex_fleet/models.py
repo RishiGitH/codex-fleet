@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from enum import Enum
+from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
 
-class WorkItemState(str, Enum):
+class WorkItemState(StrEnum):
     BACKLOG = "Backlog"
     READY = "Ready"
     RUNNING = "Running"
@@ -18,7 +18,7 @@ class WorkItemState(str, Enum):
     CANCELLED = "Cancelled"
 
 
-class RunStatus(str, Enum):
+class RunStatus(StrEnum):
     QUEUED = "queued"
     PREPARING_WORKSPACE = "preparing_workspace"
     RUNNING_CODEX = "running_codex"
@@ -64,7 +64,15 @@ class RunResult:
     changed_files: tuple[str, ...] = ()
     test_commands: tuple[str, ...] = ()
     artifacts: tuple[Path, ...] = ()
+    proposed_tasks: tuple[ProposedTask, ...] = ()
     error: str | None = None
+
+
+@dataclass(frozen=True)
+class ProposedTask:
+    title: str
+    description: str | None = None
+    labels: tuple[str, ...] = ("agent-proposed",)
 
 
 @dataclass
@@ -78,10 +86,10 @@ class RunRecord:
     codex_turn_id: str | None = None
     attempts: int = 0
     error: str | None = None
-    started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def mark(self, status: RunStatus, error: str | None = None) -> None:
         self.status = status
         self.error = error
-        self.updated_at = datetime.now(timezone.utc)
+        self.updated_at = datetime.now(UTC)

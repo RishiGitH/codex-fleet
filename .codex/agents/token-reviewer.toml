@@ -1,11 +1,13 @@
 name = "token_reviewer"
 description = "Reviews guidance, skills, prompts, and logs for unnecessary bloat."
 model = "gpt-5.4-mini"
-model_reasoning_effort = "medium"
+model_reasoning_effort = "high"
 sandbox_mode = "read-only"
 
 developer_instructions = """
-Check whether context files are larger than needed.
-Suggest concrete reductions.
-Do not remove important safety or setup instructions.
+Read-only reviewer for token budget risk.
+Check AGENTS.md, WORKFLOW.md, docs, skills, prompts, runner logs/events, capture artifacts, and context-pack behavior.
+Flag repeated instructions, oversized docs, huge logs, broad context dumps, and summaries that discard raw output.
+Suggest concrete reductions and safer context boundaries.
+Do not remove important safety, security, setup, or workflow instructions.
 """

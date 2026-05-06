@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 
 from codex_fleet.harness import apply_harness, plan_harness
@@ -32,3 +33,54 @@ def test_apply_harness_can_overwrite(tmp_path: Path) -> None:
     apply_harness(tmp_path, overwrite=True)
 
     assert "This repo is configured for Codex" in existing.read_text()
+
+
+def test_plan_harness_detects_node_commands(tmp_path: Path) -> None:
+    _init_git_repo(tmp_path)
+    (tmp_path / "package.json").write_text(
+        '{"scripts":{"test":"vitest","lint":"eslint .","typecheck":"tsc --noEmit","build":"vite build","dev":"vite"}}\n'
+    )
+    (tmp_path / "pnpm-lock.yaml").write_text("")
+
+    plan = plan_harness(tmp_path)
+
+    assert plan.scan.git_root == tmp_path
+    assert plan.scan.stack == "node"
+    assert plan.scan.package_manager == "pnpm"
+    assert plan.scan.install_command == "pnpm install"
+    assert plan.scan.test_command == "pnpm test"
+    assert plan.scan.lint_command == "pnpm lint"
+    assert plan.scan.typecheck_command == "pnpm typecheck"
+    assert plan.scan.build_command == "pnpm build"
+    assert plan.scan.dev_command == "pnpm dev"
+
+
+def test_plan_harness_detects_python_commands_and_status(tmp_path: Path) -> None:
+    _init_git_repo(tmp_path)
+    (tmp_path / "pyproject.toml").write_text("[build-system]\nrequires=[]\n[tool.ruff]\n[tool.mypy]\n")
+    (tmp_path / "tests").mkdir()
+    apply_harness(tmp_path)
+
+    plan = plan_harness(tmp_path)
+
+    assert plan.status == "warnings"
+    assert plan.scan.stack == "python"
+    assert plan.scan.install_command == "pip install -e '.[dev]'"
+    assert plan.scan.test_command == "pytest"
+    assert plan.scan.lint_command == "ruff check ."
+    assert plan.scan.typecheck_command == "mypy ."
+    assert plan.scan.build_command == "python -m build"
+    assert "git worktree has uncommitted changes" in plan.scan.warnings
+
+
+def test_plan_harness_blocks_non_git_repo(tmp_path: Path) -> None:
+    plan = plan_harness(tmp_path)
+
+    assert plan.status == "blocked"
+    assert "not a git repository" in plan.scan.warnings
+
+
+def _init_git_repo(path: Path) -> None:
+    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=path, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=path, check=True)

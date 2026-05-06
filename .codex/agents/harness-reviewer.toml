@@ -1,6 +1,6 @@
 name = "harness_reviewer"
 description = "Reviews whether changes keep this repository easy for Codex to use."
-model = "gpt-5.5"
+model = "gpt-5.4-mini"
 model_reasoning_effort = "high"
 sandbox_mode = "read-only"
 
