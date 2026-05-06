@@ -363,6 +363,77 @@ def test_up_starts_local_api_for_long_running_plane_ui(tmp_path: Path, monkeypat
     assert calls[-1] == "api-shutdown"
 
 
+def test_up_matches_local_api_host_to_loopback_plane_host(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / ".codex-fleet.yml").write_text(
+        "repo: .\n"
+        "tracker:\n"
+        "  kind: plane\n"
+        "  active_states: [Ready]\n"
+        "  plane_base_url: http://localhost:8080\n"
+        "  plane_api_key: test-key\n"
+        "  plane_workspace_slug: local\n"
+        "  plane_project_id: project-id\n"
+    )
+    calls: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(
+        "codex_fleet.cli.main.check_plane_url",
+        lambda _url: PlaneStatus(url="http://localhost:8080", ready=True, message="HTTP 200 at /"),
+    )
+    monkeypatch.setattr(
+        "codex_fleet.cli.main.wait_for_plane",
+        lambda _url: PlaneStatus(url="http://localhost:8080", ready=True, message="HTTP 200 at /"),
+    )
+    monkeypatch.setattr("codex_fleet.cli.main.build_plane_client", lambda _config: object())
+    monkeypatch.setattr("codex_fleet.cli.main.ensure_plane_bootstrap", lambda _client, _states: None)
+    monkeypatch.setattr(
+        "codex_fleet.cli.main.prepare_plane_preview_build",
+        lambda _repo: tmp_path / ".codex-fleet" / "plane-src" / "apps" / "web" / "build" / "client",
+    )
+    monkeypatch.setattr(
+        "codex_fleet.cli.main.install_branded_plane_frontend",
+        lambda _repo, _build_dir: PlaneFrontendReport(
+            container="plane-app-web-1",
+            build_dir=tmp_path / "build",
+            backup_dir=tmp_path / "backup",
+            installed=True,
+            message="installed",
+        ),
+    )
+
+    class FakeApiServer:
+        def serve_forever(self) -> None:
+            calls.append(("api-serve", None))
+
+        def shutdown(self) -> None:
+            calls.append(("api-shutdown", None))
+
+    def fake_create_local_api_server(*_args, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(("api-host", kwargs["host"]))
+        return FakeApiServer()
+
+    monkeypatch.setattr("codex_fleet.cli.main.create_local_api_server", fake_create_local_api_server)
+    monkeypatch.setattr("codex_fleet.cli.main.open_plane", lambda url: calls.append(("open", url)) or True)
+
+    class FakeDaemon:
+        def __init__(self, *_args, **_kwargs) -> None:
+            calls.append(("daemon", None))
+
+        def run(self, **_kwargs):  # type: ignore[no-untyped-def]
+            return SimpleNamespace(ticks=1, dispatched=0)
+
+    monkeypatch.setattr("codex_fleet.cli.main.FleetDaemon", FakeDaemon)
+
+    result = CliRunner().invoke(main, ["up", "--repo", str(tmp_path), "--fake"])
+
+    assert result.exit_code == 0
+    assert ("api-host", "localhost") in calls
+    assert "codex-fleet API: http://localhost:8790" in result.output
+    opened_url = next(value for kind, value in calls if kind == "open")
+    assert "http://localhost:8790/api/plane/login?" in str(opened_url)
+    assert "planeOrigin=http%3A%2F%2Flocalhost%3A8080" in str(opened_url)
+
+
 def test_up_reports_local_plane_start_failure(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / ".codex-fleet.yml").write_text(
         "repo: .\n"

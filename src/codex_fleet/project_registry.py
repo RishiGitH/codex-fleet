@@ -100,10 +100,11 @@ class ProjectRegistry:
     ) -> LocalProject:
         resolved = validate_project_path(repo_path)
         project_name = name or resolved.name
-        project_slug = slug or slugify(project_name)
         git_root = discover_git_root(resolved)
         settings = normalize_codex_settings({**(codex_settings or {}), "runner_mode": runner_mode})
         with self._connect() as db:
+            existing = db.execute("select slug from projects where repo_path = ?", (str(resolved),)).fetchone()
+            project_slug = slug or (str(existing["slug"]) if existing is not None else _unique_project_slug(db, slugify(project_name)))
             db.execute(
                 """
                 insert into projects (
@@ -244,6 +245,17 @@ def discover_git_root(path: Path) -> Path | None:
 def slugify(value: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
     return slug or "project"
+
+
+def _unique_project_slug(db: sqlite3.Connection, base_slug: str) -> str:
+    rows = db.execute("select slug from projects where slug = ? or slug glob ?", (base_slug, f"{base_slug}-[0-9]*")).fetchall()
+    used = {str(row["slug"]) for row in rows}
+    if base_slug not in used:
+        return base_slug
+    suffix = 2
+    while f"{base_slug}-{suffix}" in used:
+        suffix += 1
+    return f"{base_slug}-{suffix}"
 
 
 def normalize_codex_settings(raw: dict[str, Any] | None) -> dict[str, Any]:

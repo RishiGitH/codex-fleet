@@ -859,13 +859,14 @@ def up(repo: Path, fake: bool, fake_fail: bool, once: bool, sleep_seconds: float
     max_ticks = 1 if once else None
     api_server: LocalApiServer | None = None
     if config.tracker.kind == "plane" and _is_loopback_url(config.tracker.plane_base_url or "") and not once:
+        api_host = _loopback_host_for_url(config.tracker.plane_base_url or DEFAULT_PLANE_URL)
         try:
-            api_server = create_local_api_server(config.repo, host=DEFAULT_LOCAL_API_HOST, port=DEFAULT_LOCAL_API_PORT)
+            api_server = create_local_api_server(config.repo, host=api_host, port=DEFAULT_LOCAL_API_PORT)
         except LocalApiError as exc:
             raise click.ClickException(f"codex-fleet local API could not be started: {exc}") from exc
         api_thread = threading.Thread(target=api_server.serve_forever, daemon=True)
         api_thread.start()
-        api_url = f"http://{DEFAULT_LOCAL_API_HOST}:{DEFAULT_LOCAL_API_PORT}"
+        api_url = f"http://{api_host}:{DEFAULT_LOCAL_API_PORT}"
         console.print(f"codex-fleet API: {api_url}")
         console.print("Plane run controls can use the local API token from .codex-fleet/secrets/local_api_token.")
         board_path = _plane_board_path(config)
@@ -1035,6 +1036,11 @@ def _ensure_plane_frontend_build(repo: Path) -> Path:
 def _is_loopback_url(url: str) -> bool:
     host = urlparse(url).hostname
     return host in {"127.0.0.1", "localhost", "::1"}
+
+
+def _loopback_host_for_url(url: str) -> str:
+    host = urlparse(url).hostname
+    return host if host in {"127.0.0.1", "localhost"} else DEFAULT_LOCAL_API_HOST
 
 
 def _print_watch_banner(config: FleetConfig, *, fake: bool, fake_fail: bool) -> None:

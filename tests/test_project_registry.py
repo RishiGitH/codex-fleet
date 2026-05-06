@@ -45,6 +45,21 @@ def test_project_registry_updates_plane_mapping(tmp_path: Path) -> None:
     )
 
 
+def test_project_registry_generates_unique_slugs_for_same_named_projects(tmp_path: Path) -> None:
+    first = tmp_path / "first" / "app"
+    second = tmp_path / "second" / "app"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    registry = ProjectRegistry(tmp_path / "projects.sqlite3")
+
+    first_project = registry.add_project(first)
+    second_project = registry.add_project(second)
+
+    assert first_project.slug == "app"
+    assert second_project.slug == "app-2"
+    assert [project.slug for project in registry.list_projects()] == ["app", "app-2"]
+
+
 def test_project_registry_migrates_fake_runner_mode_to_codex(tmp_path: Path) -> None:
     project_dir = tmp_path / "app"
     project_dir.mkdir()

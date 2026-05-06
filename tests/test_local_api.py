@@ -888,7 +888,9 @@ def test_plane_login_endpoint_sets_plane_session_cookie(tmp_path: Path, monkeypa
         assert parsed_location.path == "/codex-fleet/"
         assert fragment["apiUrl"] == [f"http://127.0.0.1:{server.server_port}"]
         assert fragment["code"][0]
-        assert "session-id=session-secret" in (response.getheader("Set-Cookie") or "")
+        cookies = response.headers.get_all("Set-Cookie")
+        assert any(cookie.startswith("session-id=session-secret;") for cookie in cookies)
+        assert any(cookie.startswith("sessionid=session-secret;") for cookie in cookies)
 
         exchanged = _json_request(f"http://127.0.0.1:{server.server_port}/api/session/exchange?code={fragment['code'][0]}")
         assert exchanged["token"] == server.token

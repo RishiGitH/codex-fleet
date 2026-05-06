@@ -651,10 +651,11 @@ class _Handler(BaseHTTPRequestHandler):
     def _send_plane_login_redirect(self, redirect: str, session_key: str) -> None:
         self.send_response(HTTPStatus.FOUND.value)
         self.send_header("Location", redirect)
-        self.send_header(
-            "Set-Cookie",
-            f"session-id={session_key}; Max-Age=604800; Path=/; HttpOnly; SameSite=Lax",
-        )
+        for cookie_name in ("session-id", "sessionid"):
+            self.send_header(
+                "Set-Cookie",
+                f"{cookie_name}={session_key}; Max-Age=604800; Path=/; HttpOnly; SameSite=Lax",
+            )
         self.end_headers()
 
 
