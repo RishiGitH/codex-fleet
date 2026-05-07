@@ -1,40 +1,40 @@
-model = "gpt-5.4-mini"
-model_reasoning_effort = "medium"
+model = "gpt-5.5"
+model_reasoning_effort = "low"
 sandbox_mode = "workspace-write"
 approval_policy = "on-request"
 
 [agents]
-max_threads = 6
+max_threads = 3
 max_depth = 1
-job_max_runtime_seconds = 1800
+job_max_runtime_seconds = 1200
 
 [profiles.safe]
 model = "gpt-5.4-mini"
-model_reasoning_effort = "low"
+model_reasoning_effort = "high"
 sandbox_mode = "read-only"
 approval_policy = "untrusted"
 
 [profiles.dev]
-model = "gpt-5.4-mini"
-model_reasoning_effort = "medium"
+model = "gpt-5.5"
+model_reasoning_effort = "low"
 sandbox_mode = "workspace-write"
 approval_policy = "on-request"
 
 [profiles.orchestrate]
 model = "gpt-5.5"
-model_reasoning_effort = "high"
+model_reasoning_effort = "medium"
 sandbox_mode = "workspace-write"
 approval_policy = "on-request"
 
 [profiles.review]
 model = "gpt-5.5"
-model_reasoning_effort = "high"
+model_reasoning_effort = "medium"
 sandbox_mode = "read-only"
 approval_policy = "on-request"
 
 [profiles.ci]
 model = "gpt-5.4-mini"
-model_reasoning_effort = "low"
+model_reasoning_effort = "high"
 sandbox_mode = "read-only"
 approval_policy = "never"
 

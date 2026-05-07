@@ -27,6 +27,16 @@ class Tracker(ABC):
     def create_comment(self, item_id: str, body: str) -> None:
         raise NotImplementedError
 
+    def create_work_item(
+        self,
+        *,
+        title: str,
+        description: str | None,
+        state: str,
+        labels: tuple[str, ...] = (),
+    ) -> WorkItem | None:
+        raise TrackerError("Tracker does not support creating work items.")
+
 
 class MemoryTracker(Tracker):
     def __init__(self, items: list[WorkItem] | None = None, active_states: list[str] | None = None) -> None:
@@ -44,6 +54,12 @@ class MemoryTracker(Tracker):
     def fetch_items_by_ids(self, ids: list[str]) -> list[WorkItem]:
         return [self._items[item_id] for item_id in ids if item_id in self._items]
 
+    def fetch_all_items(self) -> list[WorkItem]:
+        return list(self._items.values())
+
+    def add_item(self, item: WorkItem) -> None:
+        self._items[item.id] = item
+
     def update_item_state(self, item_id: str, state: str) -> None:
         if item_id not in self._items:
             raise TrackerError(f"Unknown work item: {item_id}")
@@ -53,3 +69,23 @@ class MemoryTracker(Tracker):
         if item_id not in self._items:
             raise TrackerError(f"Unknown work item: {item_id}")
         self._comments.setdefault(item_id, []).append(body)
+
+    def create_work_item(
+        self,
+        *,
+        title: str,
+        description: str | None,
+        state: str,
+        labels: tuple[str, ...] = (),
+    ) -> WorkItem:
+        identifier = f"CF-{len(self._items) + 1}"
+        item = WorkItem(
+            id=str(len(self._items) + 1),
+            identifier=identifier,
+            title=title,
+            description=description,
+            state=state,
+            labels=labels,
+        )
+        self.add_item(item)
+        return item

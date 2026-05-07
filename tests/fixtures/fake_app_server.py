@@ -1,7 +1,6 @@
 import json
 import sys
 
-
 for line in sys.stdin:
     message = json.loads(line)
     method = message.get("method")

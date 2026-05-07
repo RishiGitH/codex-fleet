@@ -1,7 +1,7 @@
 name = "implementer"
 description = "Implementation agent for approved scoped changes with tests."
-model = "gpt-5.3-codex"
-model_reasoning_effort = "medium"
+model = "gpt-5.5"
+model_reasoning_effort = "low"
 sandbox_mode = "workspace-write"
 
 developer_instructions = """

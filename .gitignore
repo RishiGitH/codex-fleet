@@ -11,4 +11,5 @@ build/
 *.egg-info/
 .env
 .codex-fleet.yml
+.codex-fleet/
 .DS_Store

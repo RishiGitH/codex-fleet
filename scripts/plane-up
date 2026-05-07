@@ -2,40 +2,6 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PLANE_DIR="$ROOT_DIR/.codex-fleet/plane-selfhost"
+PYTHON="${PYTHON:-python3}"
 
-mkdir -p "$PLANE_DIR"
-cd "$PLANE_DIR"
-
-if ! command -v docker >/dev/null 2>&1; then
-  echo "Docker is required to run local Plane." >&2
-  exit 1
-fi
-
-if ! docker compose version >/dev/null 2>&1; then
-  echo "Docker Compose v2 is required. Install Docker Desktop or docker compose." >&2
-  exit 1
-fi
-
-if [ ! -f setup.sh ]; then
-  echo "Downloading Plane official self-host setup script..."
-  curl -fsSL -o setup.sh https://github.com/makeplane/plane/releases/latest/download/setup.sh
-  chmod +x setup.sh
-fi
-
-cat <<'MSG'
-
-Plane uses its official interactive self-host installer.
-Choose:
-  1) Install   the first time
-  2) Start     after install
-  3) Stop      to stop Plane
-  4) Restart   to restart Plane
-
-After Plane starts, create your local account/project in the browser,
-then create an API key and run:
-  python -m codex_fleet plane-check --repo .
-
-MSG
-
-./setup.sh
+exec "$PYTHON" -m codex_fleet plane-up --repo "$ROOT_DIR" "$@"

@@ -2,9 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from codex_fleet.config import FleetConfig, TrackerConfig
+from codex_fleet.config import CodexConfig, FleetConfig, TrackerConfig
 from codex_fleet.factory import build_runner, build_tracker, default_store_path
-from codex_fleet.runner import CodexAppServerRunner, FakeRunner
+from codex_fleet.runner import CodexAppServerRunner, CodexCliRunner, FakeRunner
 from codex_fleet.tracker import MemoryTracker
 
 
@@ -26,7 +26,23 @@ def test_build_runner_selects_fake_or_codex() -> None:
     config = FleetConfig()
 
     assert isinstance(build_runner(config, fake=True), FakeRunner)
+    runner = build_runner(config, fake=False)
+    assert isinstance(runner, CodexCliRunner)
+    assert runner.stream_logs is True
+
+
+def test_build_runner_preserves_app_server_mode() -> None:
+    config = FleetConfig(codex=CodexConfig(runner="app-server", command="codex app-server"))
+
     assert isinstance(build_runner(config, fake=False), CodexAppServerRunner)
+
+
+def test_build_runner_can_force_fake_failure() -> None:
+    config = FleetConfig()
+    runner = build_runner(config, fake=True, fake_succeed=False)
+
+    assert isinstance(runner, FakeRunner)
+    assert runner.succeed is False
 
 
 def test_default_store_path_is_inside_repo(tmp_path: Path) -> None:

@@ -4,9 +4,13 @@
 
 Turn the Phase 1 foundation into a real local loop with Plane and Codex App Server.
 
+This plan is historical. The current product direction is captured in
+`docs/product-design.md`: use a shallow branded Plane fork for local product UX
+and keep codex-fleet as the orchestration engine.
+
 ## Non-goals
 
-- No custom Plane UI fork.
+- No custom Kanban replacement for Plane.
 - No auto-merge.
 - No hosted SaaS.
 - No multi-repo dashboard yet.

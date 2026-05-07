@@ -6,7 +6,7 @@ from pathlib import Path
 from codex_fleet.config import FleetConfig
 from codex_fleet.models import WorkItem
 from codex_fleet.plane import PlaneClient, PlaneSettings, PlaneTracker
-from codex_fleet.runner import CodexAppServerRunner, FakeRunner, Runner
+from codex_fleet.runner import CodexAppServerRunner, CodexCliRunner, FakeRunner, Runner
 from codex_fleet.tracker import MemoryTracker, Tracker
 
 
@@ -44,9 +44,17 @@ def build_plane_client(config: FleetConfig) -> PlaneClient:
     return PlaneClient(settings)
 
 
-def build_runner(config: FleetConfig, *, fake: bool = False) -> Runner:
+def build_runner(config: FleetConfig, *, fake: bool = False, fake_succeed: bool = True) -> Runner:
     if fake:
-        return FakeRunner()
+        return FakeRunner(succeed=fake_succeed)
+    if config.codex.runner == "cli":
+        return CodexCliRunner(
+            command=config.codex.command,
+            approval_policy=config.codex.approval_policy,
+            sandbox_mode=config.codex.sandbox_mode,
+            timeout_seconds=max(1, config.codex.turn_timeout_ms // 1000),
+            stream_logs=config.codex.stream_logs,
+        )
     return CodexAppServerRunner(
         command=config.codex.command,
         approval_policy=config.codex.approval_policy,
@@ -56,7 +64,7 @@ def build_runner(config: FleetConfig, *, fake: bool = False) -> Runner:
 
 
 def default_store_path(repo: Path) -> Path:
-    return repo.expanduser().resolve() / ".codex-fleet" / "runs.sqlite3"
+    return repo.expanduser().absolute() / ".codex-fleet" / "runs.sqlite3"
 
 
 def _required(value: str | None, name: str) -> str:

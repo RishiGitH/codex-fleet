@@ -1,30 +1,62 @@
-.PHONY: install test lint doctor budget bootstrap smoke local-check full-local-check up plane-up docker-up docker-down
+.PHONY: install test lint doctor budget bootstrap smoke local-check full-local-check up demo down plane-up plane-status plane-bootstrap plane-source plane-verify plane-fork-preview plane-fork-prepare plane-fork-clone docker-up docker-down
+
+PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
+PYTEST ?= $(if $(wildcard .venv/bin/pytest),.venv/bin/pytest,pytest)
+RUFF ?= $(if $(wildcard .venv/bin/ruff),.venv/bin/ruff,ruff)
 
 install:
-	python -m pip install -e '.[dev]'
+	$(PYTHON) -c "import codex_fleet" || $(PYTHON) -m pip install -e '.[dev]'
 
 lint:
-	ruff check .
+	$(RUFF) check .
 
 test:
-	pytest
+	$(PYTEST)
 
 doctor:
-	python -m codex_fleet doctor --repo .
+	$(PYTHON) -m codex_fleet doctor --repo .
 
 budget:
-	python -m codex_fleet budget --repo .
+	$(PYTHON) -m codex_fleet budget --repo .
 
 bootstrap:
-	python -m codex_fleet bootstrap --repo .
+	$(PYTHON) -m codex_fleet bootstrap --repo .
 
 smoke:
-	python -m codex_fleet up --repo . --fake --once
+	$(PYTEST) tests/test_daemon.py tests/test_orchestrator.py
 
-up: install smoke
+up: install
+	PYTHONUNBUFFERED=1 $(PYTHON) -m codex_fleet up --repo . --verbose
+
+demo: install
+	PYTHONUNBUFFERED=1 $(PYTHON) -m codex_fleet up --repo . --fake --verbose
+
+down:
+	$(PYTHON) -m codex_fleet down --repo .
 
 plane-up:
-	bash scripts/plane-up
+	$(PYTHON) -m codex_fleet plane-up --repo .
+
+plane-status:
+	$(PYTHON) -m codex_fleet plane-status --repo .
+
+plane-bootstrap:
+	$(PYTHON) -m codex_fleet plane-bootstrap --repo .
+
+plane-source:
+	$(PYTHON) -m codex_fleet plane-source --repo .
+
+plane-verify:
+	$(PYTHON) -m codex_fleet plane-verify --repo .
+
+plane-fork-preview:
+	$(PYTHON) -m codex_fleet plane-fork-preview --repo .
+
+plane-fork-prepare:
+	$(PYTHON) -m codex_fleet plane-fork-preview --repo . --prepare-only
+
+plane-fork-clone:
+	scripts/plane-fork-clone
 
 local-check: install lint test doctor budget
 
