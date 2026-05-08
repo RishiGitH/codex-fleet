@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from uuid import uuid4
 
@@ -34,8 +35,9 @@ class Orchestrator:
         tracker: Tracker,
         runner: Runner,
         store: RunStore | None = None,
-        agent_task_mode: str = "agent_task_planner",
+        agent_task_mode: str = "review_and_approve",
         max_task_depth: int = 2,
+        max_child_tasks_per_run: int = 8,
         runner_factory: Callable[[WorkItem], Runner] | None = None,
         agent_task_settings_resolver: Callable[[WorkItem], tuple[str, int]] | None = None,
     ) -> None:
@@ -45,12 +47,14 @@ class Orchestrator:
         self.store = store
         self.agent_task_mode = agent_task_mode
         self.max_task_depth = max(0, max_task_depth)
+        self.max_child_tasks_per_run = max(1, max_child_tasks_per_run)
         self.runner_factory = runner_factory
         self.agent_task_settings_resolver = agent_task_settings_resolver
         self.worktrees = WorktreeManager(config.repo, config.workspace.root)
 
     def run_once(self) -> OrchestratorResult:
         candidates = self.tracker.fetch_candidate_items()
+        candidates = [item for item in candidates if not self._dependency_blocked(item)]
         if not candidates:
             return OrchestratorResult(False, None, "No candidate work items found.")
 
@@ -63,6 +67,21 @@ class Orchestrator:
             agent_task_mode = self.agent_task_mode
             max_task_depth = self.max_task_depth
         run = RunRecord(id=str(uuid4()), item=item, status=RunStatus.QUEUED)
+        run.runner_name = type(runner).__name__
+        run.agent_role, run.agent_name, run.agent_avatar = _agent_identity(item)
+        run.settings = {
+            "agent_task_mode": agent_task_mode,
+            "automation_mode": _automation_mode_from_agent_task_mode(agent_task_mode),
+            "max_task_depth": max_task_depth,
+            "approval_policy": self.config.codex.approval_policy,
+            "sandbox_mode": self.config.codex.sandbox_mode,
+        }
+        if self.store is not None:
+            metadata = self.store.get_task_metadata(item.id)
+            if metadata is not None and metadata.role:
+                run.agent_role, run.agent_name, run.agent_avatar = _agent_identity_from_role(metadata.role)
+                run.settings["agent_role"] = run.agent_role
+        run.model = _runner_model(runner)
         if self.store is not None and not self.store.try_claim_item(item.id, run.id):
             return OrchestratorResult(False, None, f"Work item already claimed: {item.identifier}")
         self._persist(run)
@@ -110,6 +129,8 @@ class Orchestrator:
                 {"runner": type(runner).__name__, "agent_task_mode": agent_task_mode, "max_task_depth": max_task_depth},
             )
             result = runner.run(item, workspace.path)
+            run.token_usage = result.token_usage
+            self._persist(run)
             self._event(
                 run,
                 "runner_finished",
@@ -118,6 +139,7 @@ class Orchestrator:
                     "changed_files": list(result.changed_files),
                     "test_commands": list(result.test_commands),
                     "artifact_count": len(result.artifacts),
+                    "token_usage": _token_usage_payload(result.token_usage),
                 },
             )
             if result.success:
@@ -127,6 +149,24 @@ class Orchestrator:
                     agent_task_mode=agent_task_mode,
                     max_task_depth=max_task_depth,
                 )
+                if proposed_items and agent_task_mode == "agent_task_planner":
+                    run.mark(RunStatus.HUMAN_REVIEW)
+                    self._persist(run)
+                    self._artifacts(run, result.artifacts)
+                    self._event(
+                        run,
+                        "parent_waiting",
+                        {"state": WorkItemState.PLANNING.value, "child_count": len(proposed_items)},
+                    )
+                    self.tracker.create_comment(
+                        item.id,
+                        _success_comment(run, result.summary, result.test_commands, proposed_items)
+                        + "\n\nParent is waiting while child tasks run.",
+                    )
+                    self.tracker.update_item_state(item.id, WorkItemState.PLANNING.value)
+                    if self.store is not None:
+                        self.store.finish_claim(item.id, run.id, "completed")
+                    return OrchestratorResult(True, run, "Run created child tasks and moved parent to Planning.")
                 run.mark(RunStatus.HUMAN_REVIEW)
                 self._persist(run)
                 self._artifacts(run, result.artifacts)
@@ -150,7 +190,25 @@ class Orchestrator:
                     self.store.finish_claim(item.id, run.id, "completed")
                 return OrchestratorResult(True, run, "Run completed and moved to Human Review.")
 
-            run.mark(RunStatus.FAILED, result.error)
+            if result.needs_input is not None:
+                run.mark(RunStatus.NEEDS_INPUT, result.needs_input.question)
+                self._persist(run)
+                self._artifacts(run, result.artifacts)
+                self._event(
+                    run,
+                    "needs_input",
+                    {
+                        "question": result.needs_input.question,
+                        "state": result.needs_input.suggested_state,
+                    },
+                )
+                self.tracker.create_comment(item.id, _needs_input_comment(run, result.needs_input.question))
+                self.tracker.update_item_state(item.id, WorkItemState.NEEDS_INPUT.value)
+                if self.store is not None:
+                    self.store.finish_claim(item.id, run.id, "blocked")
+                return OrchestratorResult(True, run, "Run needs human input.")
+
+            run.mark(RunStatus.REWORK, result.error)
             self._persist(run)
             self._artifacts(run, result.artifacts)
             self._event(run, "failed", {"error": result.error or result.summary, "state": WorkItemState.REWORK.value})
@@ -166,20 +224,20 @@ class Orchestrator:
                 self.store.finish_claim(item.id, run.id, "failed")
             return OrchestratorResult(True, run, "Run failed and moved to Rework.")
         except Exception as exc:  # noqa: BLE001 - orchestration boundary converts failures to tracker status.
-            run.mark(RunStatus.FAILED, str(exc))
+            run.mark(RunStatus.BLOCKED, str(exc))
             self._persist(run)
-            self._event(run, "failed", {"error": str(exc), "state": WorkItemState.REWORK.value})
-            self.tracker.create_comment(item.id, f"codex-fleet orchestration error: {exc}")
-            self.tracker.update_item_state(item.id, WorkItemState.REWORK.value)
-            if self._confirm_item_state(item.id, WorkItemState.REWORK.value):
-                self._event(run, "state_update_confirmed", {"state": WorkItemState.REWORK.value})
+            self._event(run, "blocked", {"error": str(exc), "state": WorkItemState.BLOCKED.value})
+            self.tracker.create_comment(item.id, f"codex-fleet is blocked by local setup or orchestration error: {exc}")
+            self.tracker.update_item_state(item.id, WorkItemState.BLOCKED.value)
+            if self._confirm_item_state(item.id, WorkItemState.BLOCKED.value):
+                self._event(run, "state_update_confirmed", {"state": WorkItemState.BLOCKED.value})
             else:
-                self._event(run, "state_update_pending", {"requested_state": WorkItemState.REWORK.value})
-                self.tracker.create_comment(item.id, _state_update_pending_comment(run, WorkItemState.REWORK.value))
+                self._event(run, "state_update_pending", {"requested_state": WorkItemState.BLOCKED.value})
+                self.tracker.create_comment(item.id, _state_update_pending_comment(run, WorkItemState.BLOCKED.value))
                 return OrchestratorResult(True, run, "Run errored, but Plane state confirmation is pending.")
             if self.store is not None:
                 self.store.finish_claim(item.id, run.id, "failed")
-            return OrchestratorResult(True, run, "Run errored and moved to Rework.")
+            return OrchestratorResult(True, run, "Run errored and moved to Blocked.")
 
     def _persist(self, run: RunRecord) -> None:
         if self.store is None:
@@ -192,6 +250,13 @@ class Orchestrator:
             branch_name=run.branch_name,
             worktree_path=str(run.worktree_path) if run.worktree_path else None,
             error=run.error,
+            runner_name=run.runner_name,
+            agent_role=run.agent_role,
+            agent_name=run.agent_name,
+            agent_avatar=run.agent_avatar,
+            model=run.model,
+            settings=run.settings,
+            token_usage=_token_usage_payload(run.token_usage),
         )
 
     def _event(self, run: RunRecord, kind: str, payload: dict[str, object]) -> None:
@@ -203,7 +268,13 @@ class Orchestrator:
         if self.store is None:
             return
         for artifact in artifacts:
-            self.store.add_artifact(run.id, str(artifact))
+            size_bytes = None
+            digest = None
+            if artifact.exists() and artifact.is_file():
+                data = artifact.read_bytes()
+                size_bytes = len(data)
+                digest = sha256(data).hexdigest()
+            self.store.add_artifact(run.id, str(artifact), size_bytes=size_bytes, sha256=digest)
 
     def _create_proposed_tasks(
         self,
@@ -223,12 +294,17 @@ class Orchestrator:
         auto_run = agent_task_mode == "agent_task_planner" and child_depth <= max_task_depth
         state = WorkItemState.READY.value if auto_run else WorkItemState.BACKLOG.value
         source_label = "agent-followup" if auto_run else "agent-proposed"
-        for task in tasks:
+        parent_metadata = self.store.get_task_metadata(run.item.id) if self.store is not None else None
+        root_item_id = parent_metadata.root_item_id if parent_metadata is not None and parent_metadata.root_item_id else run.item.id
+        for task in tasks[: self.max_child_tasks_per_run]:
+            task_state = task.suggested_state if task.suggested_state in {WorkItemState.BACKLOG.value, WorkItemState.READY.value} else state
+            if not auto_run:
+                task_state = WorkItemState.BACKLOG.value
             try:
                 item = self.tracker.create_work_item(
                     title=task.title,
                     description=_proposed_task_description(run, task, depth=child_depth, auto_run=auto_run),
-                    state=state,
+                    state=task_state,
                     labels=_proposed_task_labels(task, source_label),
                 )
             except Exception as exc:  # noqa: BLE001 - follow-up creation must not fail the completed run.
@@ -245,7 +321,17 @@ class Orchestrator:
                         parent_identifier=run.item.identifier,
                         parent_run_id=run.id,
                         created_by_run_id=run.id,
-                        settings={"agent_task_mode": agent_task_mode, "max_task_depth": max_task_depth},
+                        root_item_id=root_item_id,
+                        role=task.role or "worker",
+                        depends_on=task.depends_on,
+                        generation=child_depth,
+                        approval_mode=_automation_mode_from_agent_task_mode(agent_task_mode),
+                        settings={
+                            "agent_task_mode": agent_task_mode,
+                            "automation_mode": _automation_mode_from_agent_task_mode(agent_task_mode),
+                            "max_task_depth": max_task_depth,
+                            "agent_role": task.role or "worker",
+                        },
                     )
                 try:
                     self.tracker.create_comment(item.id, _proposed_task_source_comment(run, depth=child_depth, auto_run=auto_run))
@@ -263,10 +349,18 @@ class Orchestrator:
                         "depth": child_depth,
                         "parent_item_id": run.item.id,
                         "parent_identifier": run.item.identifier,
-                        "state": state,
+                        "state": task_state,
                         "auto_run": auto_run,
+                        "role": task.role,
+                        "depends_on": list(task.depends_on),
                     },
                 )
+        if len(tasks) > self.max_child_tasks_per_run:
+            self._event(
+                run,
+                "proposed_tasks_truncated",
+                {"received": len(tasks), "created": self.max_child_tasks_per_run},
+            )
         return tuple(created)
 
     def _task_depth(self, item: WorkItem) -> int:
@@ -275,6 +369,17 @@ class Orchestrator:
             if metadata is not None:
                 return metadata.depth
         return _task_depth_from_description(item.description)
+
+    def _dependency_blocked(self, item: WorkItem) -> bool:
+        if self.store is None:
+            return False
+        metadata = self.store.get_task_metadata(item.id)
+        if metadata is None or not metadata.depends_on:
+            return False
+        dependencies = self.tracker.fetch_items_by_ids(list(metadata.depends_on))
+        if len(dependencies) < len(metadata.depends_on):
+            return True
+        return any(dependency.state.lower() not in {"human review", "done"} for dependency in dependencies)
 
     def _confirm_item_state(self, item_id: str, expected_state: str, *, attempts: int = 4, delay_seconds: float = 0.25) -> bool:
         expected = expected_state.lower()
@@ -328,6 +433,8 @@ def _proposed_task_description(run: RunRecord, task: ProposedTask, *, depth: int
         f"\n\n<p><strong>Source:</strong> proposed by codex-fleet run "
         f"<code>{run.id}</code> while working on <code>{run.item.identifier}</code>.</p>"
         f"\n<p><strong>Depth:</strong> {depth}</p>"
+        f"\n<p><strong>Role:</strong> {task.role or 'worker'}</p>"
+        f"\n<p><strong>Depends on:</strong> {', '.join(task.depends_on) if task.depends_on else 'none'}</p>"
         f"\n<p><strong>Automation:</strong> {state}</p>"
     )
     body = task.description or "Agent proposed this follow-up task."
@@ -344,8 +451,18 @@ def _proposed_task_source_comment(run: RunRecord, *, depth: int, auto_run: bool)
 
 def _proposed_task_labels(task: ProposedTask, source_label: str) -> tuple[str, ...]:
     labels = [source_label]
+    if task.role:
+        labels.append(f"agent-{task.role}")
     labels.extend(label for label in task.labels if label not in {"agent-proposed", "agent-followup"})
     return tuple(dict.fromkeys(labels))
+
+
+def _needs_input_comment(run: RunRecord, question: str) -> str:
+    return (
+        f"codex-fleet needs input for run `{run.id}`.\n\n"
+        f"Question: {question}\n\n"
+        "Answer in a comment, then move this work item back to Ready."
+    )
 
 
 def _task_depth_from_description(description: str | None) -> int:
@@ -360,3 +477,66 @@ def _task_depth_from_description(description: str | None) -> int:
         return int(match.group(1))
     except ValueError:
         return 0
+
+
+def _runner_model(runner: Runner) -> str | None:
+    command = getattr(runner, "command", None)
+    if not isinstance(command, str):
+        return None
+    parts = command.split()
+    for index, part in enumerate(parts):
+        if part in {"--model", "-m"} and index + 1 < len(parts):
+            return parts[index + 1]
+        if part.startswith("--model="):
+            return part.split("=", 1)[1]
+    return None
+
+
+def _agent_identity(item: WorkItem) -> tuple[str, str, str]:
+    labels = {label.lower() for label in item.labels}
+    if "agent-lead" in labels:
+        return "lead", "Lead", "L"
+    if "agent-code_scout" in labels or "agent-code-scout" in labels or "agent-scout" in labels:
+        return "code_scout", "Scout", "S"
+    if "agent-reviewer" in labels or "agent-harness_reviewer" in labels or "agent-security_reviewer" in labels:
+        return "reviewer", "Reviewer", "R"
+    if "agent-worker" in labels:
+        return "worker", "Worker", "W"
+    return "implementer", "Implementer", "I"
+
+
+def _agent_identity_from_role(role: str) -> tuple[str, str, str]:
+    normalized = role.strip().lower().replace("-", "_")
+    labels = {
+        "lead": ("lead", "Lead", "L"),
+        "planner": ("planner", "Planner", "P"),
+        "code_scout": ("code_scout", "Scout", "S"),
+        "worker": ("worker", "Worker", "W"),
+        "reviewer": ("reviewer", "Reviewer", "R"),
+        "harness_reviewer": ("harness_reviewer", "Harness reviewer", "H"),
+        "security_reviewer": ("security_reviewer", "Security reviewer", "S"),
+        "token_reviewer": ("token_reviewer", "Token reviewer", "T"),
+    }
+    return labels.get(normalized, ("worker", "Worker", "W"))
+
+
+def _automation_mode_from_agent_task_mode(value: str) -> str:
+    return {
+        "manual": "manual",
+        "review_and_approve": "assisted",
+        "agent_task_planner": "full_agent",
+    }.get(value, "assisted")
+
+
+def _token_usage_payload(token_usage: object) -> dict[str, int]:
+    if token_usage is None:
+        return {}
+    return {
+        key: value
+        for key, value in {
+            "input_tokens": getattr(token_usage, "input_tokens", None),
+            "output_tokens": getattr(token_usage, "output_tokens", None),
+            "total_tokens": getattr(token_usage, "total_tokens", None),
+        }.items()
+        if isinstance(value, int)
+    }

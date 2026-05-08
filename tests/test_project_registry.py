@@ -84,15 +84,18 @@ def test_project_registry_persists_codex_settings(tmp_path: Path) -> None:
         codex_settings={
             "default_model": "gpt-5.4-mini",
             "reasoning_effort": "high",
-            "agent_task_mode": "agent_task_planner",
+            "automation_mode": "full_agent",
             "max_parallel_agents": 5,
         },
     )
 
     assert project.codex_settings["default_model"] == "gpt-5.4-mini"
     assert project.codex_settings["reasoning_effort"] == "high"
+    assert project.codex_settings["automation_mode"] == "full_agent"
     assert project.codex_settings["agent_task_mode"] == "agent_task_planner"
     assert project.codex_settings["max_parallel_agents"] == 5
+    assert project.codex_settings["max_child_tasks_per_run"] == 8
+    assert project.codex_settings["skill_policy"] == "minimal"
     assert project.codex_settings["subagents"]["implementer"]["model"] == "gpt-5.5"
 
     updated = registry.update_project_settings(project.id, {"default_model": "gpt-5.5", "max_task_depth": 2})

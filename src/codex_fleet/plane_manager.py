@@ -15,7 +15,7 @@ import yaml
 
 from codex_fleet.config import default_config_path
 
-DEFAULT_PLANE_URL = "http://127.0.0.1:8080"
+DEFAULT_PLANE_URL = "http://127.0.0.1:17880"
 PLANE_RUNTIME_DIR = Path(".codex-fleet") / "plane-selfhost"
 PLANE_SOURCE_DIR = Path(".codex-fleet") / "plane-src"
 PLANE_PATCH_PATH = Path("patches") / "plane-codex-fleet.patch"
@@ -158,6 +158,8 @@ def ensure_plane_source(
     if ref:
         _git_checked(root, "fetch", "--depth", "1", "origin", ref)
         _git_checked(root, "checkout", ref)
+        _git_checked(root, "reset", "--hard", ref)
+        _git_checked(root, "clean", "-fd")
     patch_path = default_plane_patch_path(repo)
     if apply_customizations and patch_path.exists() and not verify_plane_customization(repo, root).ok:
         apply_plane_customization_patch(repo, source_dir=root, patch_path=patch_path)
@@ -408,6 +410,11 @@ def verify_plane_customization(repo: Path, source_dir: Path | None = None) -> Pl
         ),
         _check_contains(root / "apps/web/public/sw.js", "registration.unregister", "service_worker_disabled"),
         _check_contains(
+            root / "apps/web/app/entry.client.tsx",
+            "@/lib/polyfills",
+            "safari_request_idle_callback_polyfill",
+        ),
+        _check_contains(
             root / "apps/web/core/components/common/logo-spinner.tsx",
             "codexFleetOrbit",
             "codex_loading_animation",
@@ -427,6 +434,26 @@ def verify_plane_customization(repo: Path, source_dir: Path | None = None) -> Pl
             root / "apps/web/app/codex-fleet/work-item-run-panel.tsx",
             "Agent proposed",
             "work_item_source_badge",
+        ),
+        _check_contains(
+            root / "apps/web/core/components/issues/filters.tsx",
+            "Fleet Logs",
+            "project_board_fleet_logs_button",
+        ),
+        _check_contains(
+            root / "apps/web/core/components/analytics/work-items/modal/header.tsx",
+            "Fleet Logs for",
+            "project_fleet_logs_modal_header",
+        ),
+        _check_contains(
+            root / "apps/web/core/components/analytics/work-items/modal/content.tsx",
+            "Task tree",
+            "project_fleet_logs_modal_task_tree",
+        ),
+        _check_not_contains(
+            root / "apps/web/core/components/analytics/work-items/modal/content.tsx",
+            "useAnalytics",
+            "project_fleet_logs_modal_no_analytics_store",
         ),
         _check_contains(
             root / "apps/web/core/components/issues/issue-modal/form.tsx",
@@ -772,7 +799,7 @@ def write_plane_config(
         "codex": {
             "runner": "cli",
             "command": "codex exec",
-            "approval_policy": "on-request",
+            "approval_policy": "never",
             "sandbox_mode": "workspace-write",
             "turn_timeout_ms": 3_600_000,
             "stall_timeout_ms": 300_000,

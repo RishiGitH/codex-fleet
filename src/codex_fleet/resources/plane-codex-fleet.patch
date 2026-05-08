@@ -13,7 +13,7 @@ index 000000000..1f3e659b5
 +notes: Runtime Plane source clone for codex-fleet customization. Prefer a pinned fork/submodule
 +  for product releases.
 diff --git a/AGENTS.md b/AGENTS.md
-index 3de0b8037..656f93080 100644
+index 3de0b8037..cf3296c23 100644
 --- a/AGENTS.md
 +++ b/AGENTS.md
 @@ -1,24 +1,57 @@
@@ -90,7 +90,7 @@ index 3de0b8037..656f93080 100644
 +Default local API:
 +
 +```text
-+http://127.0.0.1:8790
++http://127.0.0.1:18790
 +```
 +
 +Use a generated local token from `.codex-fleet/secrets/local_api_token` in the codex-fleet repo runtime. Never commit this token.
@@ -234,7 +234,7 @@ index 64739d60b..57d6c6530 100644
 -        workspace: "Plane",
 +        workspace: "codex-fleet",
        });
- 
+
    const currentNavigationTab = navigationTab
 diff --git a/apps/web/app/(all)/[workspaceSlug]/(projects)/star-us-link.tsx b/apps/web/app/(all)/[workspaceSlug]/(projects)/star-us-link.tsx
 index c4039f7ab..228fa5aaa 100644
@@ -242,21 +242,21 @@ index c4039f7ab..228fa5aaa 100644
 +++ b/apps/web/app/(all)/[workspaceSlug]/(projects)/star-us-link.tsx
 @@ -5,29 +5,25 @@
   */
- 
+
  import { useTheme } from "next-themes";
 -// plane imports
 -import { useTranslation } from "@plane/i18n";
  // assets
  import githubBlackImage from "@/app/assets/logos/github-black.png?url";
  import githubWhiteImage from "@/app/assets/logos/github-white.png?url";
- 
+
  export function StarUsOnGitHubLink() {
 -  // plane hooks
 -  const { t } = useTranslation();
    // hooks
    const { resolvedTheme } = useTheme();
    const imageSrc = resolvedTheme === "dark" ? githubWhiteImage : githubBlackImage;
- 
+
    return (
      <a
 -      aria-label={t("home.star_us_on_github")}
@@ -276,10 +276,10 @@ index c4039f7ab..228fa5aaa 100644
  }
 diff --git a/apps/web/app/(all)/[workspaceSlug]/(settings)/settings/projects/[projectId]/codex-fleet/page.tsx b/apps/web/app/(all)/[workspaceSlug]/(settings)/settings/projects/[projectId]/codex-fleet/page.tsx
 new file mode 100644
-index 000000000..dae0284cd
+index 000000000..65cc069ef
 --- /dev/null
 +++ b/apps/web/app/(all)/[workspaceSlug]/(settings)/settings/projects/[projectId]/codex-fleet/page.tsx
-@@ -0,0 +1,252 @@
+@@ -0,0 +1,285 @@
 +"use client";
 +
 +/**
@@ -294,20 +294,27 @@ index 000000000..dae0284cd
 +import { BreadcrumbLink } from "@/components/common/breadcrumb-link";
 +import { SettingsContentWrapper } from "@/components/settings/content-wrapper";
 +import { SettingsPageHeader } from "@/components/settings/page-header";
-+import { CodexFleetLocalApi, type CodexFleetProject, type CodexFleetProjectSettings } from "@/app/codex-fleet/local-api";
-+
-+const DEFAULT_API_URL = "http://127.0.0.1:8790";
++import {
++  CodexFleetLocalApi,
++  DEFAULT_CODEX_FLEET_API_URL,
++  ensureCodexFleetLocalConnection,
++  type CodexFleetProject,
++  type CodexFleetProjectSettings,
++} from "@/app/codex-fleet/local-api";
 +
 +const emptySettings: CodexFleetProjectSettings = {
 +  runner_mode: "codex",
 +  default_model: "gpt-5.5",
 +  reasoning_effort: "low",
-+  approval_policy: "on-request",
++  approval_policy: "never",
 +  sandbox_mode: "workspace-write",
 +  max_parallel_agents: 3,
 +  max_task_depth: 2,
++  max_child_tasks_per_run: 8,
 +  job_timeout_seconds: 1200,
-+  agent_task_mode: "agent_task_planner",
++  automation_mode: "assisted",
++  agent_task_mode: "review_and_approve",
++  skill_policy: "minimal",
 +  subagents: {
 +    code_scout: { model: "gpt-5.4-mini", reasoning_effort: "medium", sandbox_mode: "read-only" },
 +    implementer: { model: "gpt-5.5", reasoning_effort: "low", sandbox_mode: "workspace-write" },
@@ -323,17 +330,8 @@ index 000000000..dae0284cd
 +  };
 +};
 +
-+function readLocalSettings() {
-+  const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
-+  const apiUrl = hash.get("apiUrl") || window.localStorage.getItem("codexFleetLocalApiUrl") || DEFAULT_API_URL;
-+  const token = hash.get("token") || window.localStorage.getItem("codexFleetLocalToken") || "";
-+  if (hash.get("apiUrl")) window.localStorage.setItem("codexFleetLocalApiUrl", apiUrl);
-+  if (hash.get("token")) window.localStorage.setItem("codexFleetLocalToken", token);
-+  return { apiUrl, token };
-+}
-+
 +function CodexFleetProjectSettingsPage({ params }: Props) {
-+  const [apiUrl, setApiUrl] = useState(DEFAULT_API_URL);
++  const [apiUrl, setApiUrl] = useState(DEFAULT_CODEX_FLEET_API_URL);
 +  const [token, setToken] = useState("");
 +  const [project, setProject] = useState<CodexFleetProject | null>(null);
 +  const [settings, setSettings] = useState<CodexFleetProjectSettings>(emptySettings);
@@ -343,9 +341,14 @@ index 000000000..dae0284cd
 +  const api = useMemo(() => new CodexFleetLocalApi({ baseUrl: apiUrl, token: token || null }), [apiUrl, token]);
 +
 +  useEffect(() => {
-+    const local = readLocalSettings();
-+    setApiUrl(local.apiUrl);
-+    setToken(local.token);
++    ensureCodexFleetLocalConnection()
++      .then((local) => {
++        setApiUrl(local.apiUrl);
++        setToken(local.token);
++      })
++      .catch((error) => {
++        setMessage(error instanceof Error ? error.message : "Local launcher session expired. Reopen Plane from make up.");
++      });
 +  }, []);
 +
 +  const load = async () => {
@@ -426,18 +429,35 @@ index 000000000..dae0284cd
 +            <Select label="Runner" value={settings.runner_mode} onChange={(value) => update({ runner_mode: value })} options={["codex", "app-server"]} />
 +            <Field label="Default model" value={settings.default_model} onChange={(value) => update({ default_model: value })} />
 +            <Select label="Reasoning" value={settings.reasoning_effort} onChange={(value) => update({ reasoning_effort: value })} options={["low", "medium", "high", "xhigh"]} />
-+            <Select label="Approval policy" value={settings.approval_policy} onChange={(value) => update({ approval_policy: value })} options={["on-request", "never", "untrusted"]} />
++            <Select
++              label="Local edit approval"
++              value={settings.approval_policy}
++              onChange={(value) => update({ approval_policy: value })}
++              options={[
++                ["never", "Auto local edits"],
++                ["on-request", "Ask before risky actions"],
++                ["untrusted", "Untrusted sandbox"],
++              ]}
++            />
 +            <Select label="Sandbox" value={settings.sandbox_mode} onChange={(value) => update({ sandbox_mode: value })} options={["workspace-write", "read-only", "danger-full-access"]} />
 +            <Select
-+              label="Agent task flow"
-+              value={settings.agent_task_mode}
-+              onChange={(value) => update({ agent_task_mode: value as CodexFleetProjectSettings["agent_task_mode"] })}
-+              options={["agent_task_planner", "review_and_approve"]}
++              label="Automation mode"
++              value={settings.automation_mode}
++              onChange={(value) => update({ automation_mode: value as CodexFleetProjectSettings["automation_mode"] })}
++              options={[
++                ["assisted", "Assisted: create follow-ups for review"],
++                ["full_agent", "Full Agent: auto-run child tasks"],
++                ["manual", "Manual: do not create child tasks"],
++              ]}
 +            />
 +            <NumberField label="Max parallel agents" value={settings.max_parallel_agents} onChange={(value) => update({ max_parallel_agents: value })} />
 +            <NumberField label="Max task depth" value={settings.max_task_depth} onChange={(value) => update({ max_task_depth: value })} />
++            <NumberField label="Max child tasks per run" value={settings.max_child_tasks_per_run} onChange={(value) => update({ max_child_tasks_per_run: value })} />
 +            <NumberField label="Timeout seconds" value={settings.job_timeout_seconds} onChange={(value) => update({ job_timeout_seconds: value })} />
 +          </div>
++          <p className="rounded-md border border-custom-border-200 bg-custom-background-100 px-3 py-2 text-xs leading-5 text-custom-text-300">
++            Runs happen in isolated git worktrees. codex-fleet never merges or deploys automatically.
++          </p>
 +        </section>
 +
 +        <section className="grid gap-4">
@@ -516,16 +536,29 @@ index 000000000..dae0284cd
 +  );
 +}
 +
-+function Select({ label, value, options, onChange }: { label: string; value: string; options: string[]; onChange: (value: string) => void }) {
++function Select({
++  label,
++  value,
++  options,
++  onChange,
++}: {
++  label: string;
++  value: string;
++  options: (string | [string, string])[];
++  onChange: (value: string) => void;
++}) {
 +  return (
 +    <label className="grid gap-1 text-xs font-medium text-custom-text-300">
 +      {label}
 +      <select className="h-9 rounded-md border border-custom-border-200 bg-custom-background-100 px-2 text-sm text-custom-text-100 outline-none focus:border-custom-primary-100" value={value} onChange={(event) => onChange(event.target.value)}>
-+        {options.map((option) => (
-+          <option key={option} value={option}>
-+            {option}
++        {options.map((option) => {
++          const [optionValue, optionLabel] = Array.isArray(option) ? option : [option, option];
++          return (
++          <option key={optionValue} value={optionValue}>
++            {optionLabel}
 +          </option>
-+        ))}
++          );
++        })}
 +      </select>
 +    </label>
 +  );
@@ -552,7 +585,7 @@ index f503c81e2..02ddf20c4 100644
 @@ -11,4 +11,4 @@ export default function ForgotPasswordLayout() {
    return <Outlet />;
  }
- 
+
 -export const meta: Route.MetaFunction = () => [{ title: "Forgot Password - Plane" }];
 +export const meta: Route.MetaFunction = () => [{ title: "Forgot Password - codex-fleet" }];
 diff --git a/apps/web/app/(all)/accounts/reset-password/layout.tsx b/apps/web/app/(all)/accounts/reset-password/layout.tsx
@@ -562,7 +595,7 @@ index d3955daa8..3e6dbcff0 100644
 @@ -11,4 +11,4 @@ export default function ResetPasswordLayout() {
    return <Outlet />;
  }
- 
+
 -export const meta: Route.MetaFunction = () => [{ title: "Reset Password - Plane" }];
 +export const meta: Route.MetaFunction = () => [{ title: "Reset Password - codex-fleet" }];
 diff --git a/apps/web/app/(all)/accounts/set-password/layout.tsx b/apps/web/app/(all)/accounts/set-password/layout.tsx
@@ -572,7 +605,7 @@ index 4455b84fc..5d9b3e91f 100644
 @@ -11,4 +11,4 @@ export default function SetPasswordLayout() {
    return <Outlet />;
  }
- 
+
 -export const meta: Route.MetaFunction = () => [{ title: "Set Password - Plane" }];
 +export const meta: Route.MetaFunction = () => [{ title: "Set Password - codex-fleet" }];
 diff --git a/apps/web/app/(all)/create-workspace/page.tsx b/apps/web/app/(all)/create-workspace/page.tsx
@@ -623,13 +656,13 @@ index 97a8147e4..b2756129b 100644
 +++ b/apps/web/app/(all)/sign-up/layout.tsx
 @@ -8,7 +8,7 @@ import { Outlet } from "react-router";
  import type { Route } from "./+types/layout";
- 
+
  export const meta: Route.MetaFunction = () => [
 -  { title: "Sign up - Plane" },
 +  { title: "Sign up - codex-fleet" },
    { name: "robots", content: "index, nofollow" },
  ];
- 
+
 diff --git a/apps/web/app/(all)/workspace-invitations/page.tsx b/apps/web/app/(all)/workspace-invitations/page.tsx
 index 4ab9b02eb..60645a0bc 100644
 --- a/apps/web/app/(all)/workspace-invitations/page.tsx
@@ -675,7 +708,7 @@ index 4ab9b02eb..60645a0bc 100644
              </EmptySpace>
            )
 diff --git a/apps/web/app/(home)/page.tsx b/apps/web/app/(home)/page.tsx
-index 4717705f1..47201566c 100644
+index 4717705f1..e9008d4f7 100644
 --- a/apps/web/app/(home)/page.tsx
 +++ b/apps/web/app/(home)/page.tsx
 @@ -1,26 +1,162 @@
@@ -703,7 +736,7 @@ index 4717705f1..47201566c 100644
 +  token: string;
 +};
 +
-+const DEFAULT_API_URL = "http://127.0.0.1:8790";
++const DEFAULT_API_URL = "http://127.0.0.1:18790";
 +
 +function readLocalSettings(): LocalSettings {
 +  if (typeof window === "undefined") {
@@ -732,7 +765,7 @@ index 4717705f1..47201566c 100644
 +  }
 +  return `${path}#${params.toString()}`;
 +}
- 
+
  function HomePage() {
 +  const [settings, setSettings] = useState<LocalSettings>(() => readLocalSettings());
 +
@@ -860,18 +893,18 @@ index 4717705f1..47201566c 100644
 +    </main>
    );
  }
- 
+
 diff --git a/apps/web/app/codex-fleet/dashboard.tsx b/apps/web/app/codex-fleet/dashboard.tsx
 new file mode 100644
-index 000000000..defe7a459
+index 000000000..91074b9a7
 --- /dev/null
 +++ b/apps/web/app/codex-fleet/dashboard.tsx
-@@ -0,0 +1,670 @@
+@@ -0,0 +1,736 @@
 +import { useEffect, useState } from "react";
 +import type { FormEvent, ReactNode } from "react";
 +
 +import { CodexFleetLocalApi } from "./local-api";
-+import type { CodexFleetHarness, CodexFleetProject, CodexFleetRun, CodexFleetWorkItem } from "./local-api";
++import type { CodexFleetAgentAnalytics, CodexFleetHarness, CodexFleetProject, CodexFleetRun, CodexFleetWorkItem } from "./local-api";
 +
 +type BootstrapParams = {
 +  apiUrl: string;
@@ -891,7 +924,7 @@ index 000000000..defe7a459
 +};
 +
 +export default function CodexFleetDashboard() {
-+  const [apiUrl, setApiUrl] = useState(() => readBootstrapParams().apiUrl || "http://127.0.0.1:8790");
++  const [apiUrl, setApiUrl] = useState(() => readBootstrapParams().apiUrl || "http://127.0.0.1:18790");
 +  const [token, setToken] = useState(() => readBootstrapParams().token);
 +  const [projects, setProjects] = useState<CodexFleetProject[]>([]);
 +  const [selectedProjectId, setSelectedProjectId] = useState(() =>
@@ -899,6 +932,7 @@ index 000000000..defe7a459
 +  );
 +  const [items, setItems] = useState<CodexFleetWorkItem[]>([]);
 +  const [runs, setRuns] = useState<CodexFleetRun[]>([]);
++  const [analytics, setAnalytics] = useState<CodexFleetAgentAnalytics | null>(null);
 +  const [selectedRun, setSelectedRun] = useState<CodexFleetRun | null>(null);
 +  const [projectHarness, setProjectHarness] = useState<Record<number, CodexFleetHarness>>({});
 +  const [itemRunStatus, setItemRunStatus] = useState<Record<string, CodexFleetRun | null>>({});
@@ -934,14 +968,16 @@ index 000000000..defe7a459
 +        setSelectedProjectId(String(projectId));
 +        window.localStorage.setItem("codexFleetProjectId", String(projectId));
 +      }
-+      const [readyResult, runResult, harnessResult] = await Promise.all([
++      const [readyResult, runResult, analyticsResult, harnessResult] = await Promise.all([
 +        api().readyWorkItems(projectId),
 +        api().runs(projectId),
++        projectId ? api().agentAnalytics(projectId).catch(() => null) : Promise.resolve(null),
 +        projectId ? api().planHarness(projectId).catch(() => null) : Promise.resolve(null),
 +      ]);
 +      setProjects(projectResult.projects);
 +      setItems(readyResult.items);
 +      setRuns(runResult.runs);
++      setAnalytics(analyticsResult?.analytics ?? null);
 +      if (projectId && harnessResult?.harness) {
 +        setProjectHarness((current) => ({ ...current, [projectId]: harnessResult.harness }));
 +      }
@@ -1200,6 +1236,42 @@ index 000000000..defe7a459
 +        </div>
 +
 +        <div className="grid gap-4 lg:grid-cols-3">
++          <Panel title="Fleet Logs">
++            {analytics ? (
++              <div className="grid gap-3">
++                <div className="grid grid-cols-3 gap-2 text-center">
++                  <Metric label="Runs" value={analytics.runs_total} />
++                  <Metric label="Active" value={analytics.active_runs} />
++                  <Metric label="Tokens" value={analytics.total_tokens} />
++                </div>
++                {analytics.by_role.length ? (
++                  analytics.by_role.map((agent) => (
++                    <div key={agent.role} className="rounded-md border border-white/10 bg-black/20 p-3">
++                      <div className="flex items-center justify-between gap-3">
++                        <span className="font-medium capitalize">{agent.role.replaceAll("_", " ")}</span>
++                        <span className="text-xs text-cyan-200">{agent.active} active</span>
++                      </div>
++                      <p className="mt-2 text-xs text-slate-400">
++                        {agent.success} review-ready · {agent.failed} needs attention · {agent.cancelled} cancelled
++                      </p>
++                      <p className="mt-1 text-xs text-slate-500">{agent.total_tokens.toLocaleString()} tokens</p>
++                    </div>
++                  ))
++                ) : (
++                  <EmptyText text="No agent runs yet." />
++                )}
++                {analytics.recent_events.slice(0, 5).map((event) => (
++                  <div key={event.id} className="rounded-md border border-white/10 bg-black/20 p-2 text-xs">
++                    <span className="font-medium text-slate-200">{friendlyEvent(event.kind)}</span>
++                    <span className="ml-2 text-slate-500">{event.created_at}</span>
++                  </div>
++                ))}
++              </div>
++            ) : (
++              <EmptyText text="No analytics yet. Run a Ready task to populate Fleet Logs." />
++            )}
++          </Panel>
++
 +          <Panel title="Projects">
 +            <form className="grid gap-2" onSubmit={createProject}>
 +              <p className="text-sm text-slate-300">
@@ -1489,6 +1561,33 @@ index 000000000..defe7a459
 +  return <p className="text-sm text-slate-400">{text}</p>;
 +}
 +
++function Metric({ label, value }: { label: string; value: number }) {
++  return (
++    <div className="rounded-md border border-white/10 bg-black/20 p-2">
++      <p className="text-lg font-semibold text-white">{value.toLocaleString()}</p>
++      <p className="text-[11px] uppercase tracking-wide text-slate-500">{label}</p>
++    </div>
++  );
++}
++
++function friendlyEvent(kind: string) {
++  return (
++    {
++      claimed: "Claimed",
++      workspace_prepared: "Workspace ready",
++      runner_started: "Codex started",
++      runner_finished: "Codex completed",
++      needs_input: "Needs input",
++      proposed_task_created: "Child task created",
++      parent_blocked: "Parent blocked",
++      parent_children_completed: "Ready for human review",
++      retry_requested: "Retry requested",
++      cancel_requested: "Cancel requested",
++      cancelled: "Cancelled",
++    }[kind] ?? kind.replaceAll("_", " ")
++  );
++}
++
 +function HarnessSummary({ harness, fallbackStatus }: { harness?: CodexFleetHarness; fallbackStatus: string }) {
 +  if (!harness) {
 +    return <p className="mt-2 text-xs text-slate-400">Harness: {fallbackStatus}</p>;
@@ -1539,10 +1638,10 @@ index 000000000..defe7a459
 +}
 diff --git a/apps/web/app/codex-fleet/local-api.ts b/apps/web/app/codex-fleet/local-api.ts
 new file mode 100644
-index 000000000..4ee489aab
+index 000000000..73f3413cd
 --- /dev/null
 +++ b/apps/web/app/codex-fleet/local-api.ts
-@@ -0,0 +1,317 @@
+@@ -0,0 +1,446 @@
 +export type CodexFleetProject = {
 +  id: number;
 +  name: string;
@@ -1556,7 +1655,8 @@ index 000000000..4ee489aab
 +  codex_settings: CodexFleetProjectSettings;
 +};
 +
-+export type CodexFleetAgentTaskMode = "review_and_approve" | "agent_task_planner";
++export type CodexFleetAgentTaskMode = "manual" | "review_and_approve" | "agent_task_planner";
++export type CodexFleetAutomationMode = "manual" | "assisted" | "full_agent";
 +
 +export type CodexFleetSubagentSettings = {
 +  model: string;
@@ -1572,8 +1672,11 @@ index 000000000..4ee489aab
 +  sandbox_mode: string;
 +  max_parallel_agents: number;
 +  max_task_depth: number;
++  max_child_tasks_per_run: number;
 +  job_timeout_seconds: number;
++  automation_mode: CodexFleetAutomationMode;
 +  agent_task_mode: CodexFleetAgentTaskMode;
++  skill_policy: string;
 +  subagents: Record<string, CodexFleetSubagentSettings>;
 +};
 +
@@ -1584,6 +1687,13 @@ index 000000000..4ee489aab
 +  status: string;
 +  branch_name: string | null;
 +  worktree_path: string | null;
++  runner_name?: string | null;
++  agent_role?: string | null;
++  agent_name?: string | null;
++  agent_avatar?: string | null;
++  model?: string | null;
++  settings?: Record<string, unknown>;
++  token_usage?: Record<string, number>;
 +  error: string | null;
 +  events?: CodexFleetRunEvent[];
 +  artifacts?: CodexFleetRunArtifact[];
@@ -1591,6 +1701,7 @@ index 000000000..4ee489aab
 +
 +export type CodexFleetRunEvent = {
 +  id: number;
++  run_id?: string;
 +  kind: string;
 +  payload: Record<string, unknown>;
 +  created_at: string;
@@ -1600,7 +1711,49 @@ index 000000000..4ee489aab
 +  id: number;
 +  path: string;
 +  kind: string;
++  size_bytes?: number | null;
++  sha256?: string | null;
++  redaction?: string;
 +  created_at: string;
++};
++
++export type CodexFleetTaskMetadata = {
++  item_id: string;
++  source: string;
++  depth: number;
++  parent_item_id: string | null;
++  parent_identifier: string | null;
++  parent_run_id: string | null;
++  created_by_run_id: string | null;
++  root_item_id?: string | null;
++  role?: string | null;
++  depends_on?: string[];
++  generation?: number;
++  approval_mode?: string | null;
++  terminal_outcome?: string | null;
++  settings: Record<string, unknown>;
++  created_at: string;
++  updated_at: string;
++};
++
++export type CodexFleetAgentAnalytics = {
++  runs_total: number;
++  active_runs: number;
++  total_tokens: number;
++  by_role: { role: string; runs: number; success: number; failed: number; active: number; cancelled: number; total_tokens: number }[];
++  recent_events: CodexFleetRunEvent[];
++};
++
++export type CodexFleetLogs = {
++  linked?: boolean;
++  message?: string;
++  plane_project_id?: string;
++  project: CodexFleetProject | null;
++  repo: string;
++  analytics: CodexFleetAgentAnalytics;
++  runs: CodexFleetRun[];
++  recent_events: CodexFleetRunEvent[];
++  tasks: CodexFleetTaskMetadata[];
 +};
 +
 +export type CodexFleetWorkItem = {
@@ -1670,7 +1823,46 @@ index 000000000..4ee489aab
 +
 +export type CodexFleetProjectRef = number | { plane_project_id: string };
 +
-+const DEFAULT_CODEX_FLEET_API_URL = "http://127.0.0.1:8790";
++export const DEFAULT_CODEX_FLEET_API_URL = "http://127.0.0.1:18790";
++
++export type CodexFleetLocalConnection = {
++  apiUrl: string;
++  token: string;
++};
++
++const API_URL_STORAGE_KEY = "codexFleetLocalApiUrl";
++const TOKEN_STORAGE_KEY = "codexFleetLocalToken";
++
++export function readCodexFleetLocalConnection(): CodexFleetLocalConnection {
++  if (typeof window === "undefined") return { apiUrl: DEFAULT_CODEX_FLEET_API_URL, token: "" };
++  const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
++  const apiUrl = hash.get("apiUrl") || window.localStorage.getItem(API_URL_STORAGE_KEY) || DEFAULT_CODEX_FLEET_API_URL;
++  const token = hash.get("token") || window.localStorage.getItem(TOKEN_STORAGE_KEY) || "";
++  if (hash.get("apiUrl")) window.localStorage.setItem(API_URL_STORAGE_KEY, apiUrl);
++  if (hash.get("token")) window.localStorage.setItem(TOKEN_STORAGE_KEY, token);
++  return { apiUrl, token };
++}
++
++export async function ensureCodexFleetLocalConnection(): Promise<CodexFleetLocalConnection> {
++  const connection = readCodexFleetLocalConnection();
++  if (typeof window === "undefined") return connection;
++
++  const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
++  const code = hash.get("code");
++  if (!code || connection.token) return connection;
++
++  const api = new CodexFleetLocalApi({ baseUrl: connection.apiUrl, token: null });
++  const session = await api.exchangeSessionCode(code);
++  const apiUrl = session.apiUrl || connection.apiUrl || DEFAULT_CODEX_FLEET_API_URL;
++  const token = session.token || "";
++  window.localStorage.setItem(API_URL_STORAGE_KEY, apiUrl);
++  if (token) window.localStorage.setItem(TOKEN_STORAGE_KEY, token);
++  hash.delete("code");
++  hash.set("apiUrl", apiUrl);
++  const fragment = hash.toString();
++  window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${fragment ? `#${fragment}` : ""}`);
++  return { apiUrl, token };
++}
 +
 +export class CodexFleetLocalApi {
 +  private readonly baseUrl: string;
@@ -1706,6 +1898,7 @@ index 000000000..4ee489aab
 +    project_type?: "blank" | "simple-web" | "node-next" | "python";
 +    initial_goal?: string;
 +    start_initial_goal?: boolean;
++    require_plane_mapping?: boolean;
 +    codex_settings?: Partial<CodexFleetProjectSettings>;
 +    agent_task_mode?: CodexFleetAgentTaskMode;
 +  }): Promise<{
@@ -1730,6 +1923,10 @@ index 000000000..4ee489aab
 +    });
 +  }
 +
++  async checkFolderPicker(): Promise<{ ok: boolean; available: boolean; picker: string }> {
++    return this.request("/api/folders/check");
++  }
++
 +  async pickFolder(): Promise<CodexFleetPickedFolder> {
 +    return this.request("/api/folders/pick", {
 +      method: "POST",
@@ -1739,6 +1936,10 @@ index 000000000..4ee489aab
 +
 +  async projectSettings(projectId: number | string): Promise<{ project: CodexFleetProject; settings: CodexFleetProjectSettings }> {
 +    return this.request(`/api/projects/${encodeURIComponent(String(projectId))}/settings`);
++  }
++
++  async fleetLogs(projectId: number | string): Promise<{ fleet_logs: CodexFleetLogs }> {
++    return this.request(`/api/projects/${encodeURIComponent(String(projectId))}/fleet-logs`);
 +  }
 +
 +  async updateProjectSettings(
@@ -1757,6 +1958,10 @@ index 000000000..4ee489aab
 +
 +  async run(runId: string, project?: CodexFleetProjectRef): Promise<{ run: CodexFleetRun }> {
 +    return this.request(withProjectRef(`/api/runs/${encodeURIComponent(runId)}`, project));
++  }
++
++  async agentAnalytics(projectId: number | string): Promise<{ analytics: CodexFleetAgentAnalytics }> {
++    return this.request(`/api/projects/${encodeURIComponent(String(projectId))}/agent-analytics`);
 +  }
 +
 +  async readyWorkItems(project?: CodexFleetProjectRef): Promise<{ items: CodexFleetWorkItem[] }> {
@@ -1816,6 +2021,35 @@ index 000000000..4ee489aab
 +    return this.request(withProjectRef(`/api/work-items/${encodeURIComponent(workItemId)}/run-status`, project));
 +  }
 +
++  async retryWorkItem(workItemId: string, project?: CodexFleetProjectRef): Promise<{ ok: boolean; item: CodexFleetWorkItem; previous_run: CodexFleetRun | null; state: string }> {
++    return this.request(`/api/work-items/${encodeURIComponent(workItemId)}/retry`, {
++      method: "POST",
++      body: projectRefBody(project),
++    });
++  }
++
++  async cancelWorkItem(workItemId: string, project?: CodexFleetProjectRef): Promise<{ ok: boolean; item: CodexFleetWorkItem; run: CodexFleetRun | null; state: string }> {
++    return this.request(`/api/work-items/${encodeURIComponent(workItemId)}/cancel`, {
++      method: "POST",
++      body: projectRefBody(project),
++    });
++  }
++
++  async workItemChildren(workItemId: string, project?: CodexFleetProjectRef): Promise<{ children: CodexFleetTaskMetadata[] }> {
++    return this.request(withProjectRef(`/api/work-items/${encodeURIComponent(workItemId)}/children`, project));
++  }
++
++  async workItemParent(workItemId: string, project?: CodexFleetProjectRef): Promise<{ parent: CodexFleetTaskMetadata | null }> {
++    return this.request(withProjectRef(`/api/work-items/${encodeURIComponent(workItemId)}/parent`, project));
++  }
++
++  async answerInput(workItemId: string, answer: string, project?: CodexFleetProjectRef): Promise<{ ok: boolean; state: string }> {
++    return this.request(`/api/work-items/${encodeURIComponent(workItemId)}/answer-input`, {
++      method: "POST",
++      body: { answer, ...projectRefBody(project) },
++    });
++  }
++
 +  private async request<T>(
 +    path: string,
 +    options: { method?: "GET" | "POST"; body?: Record<string, unknown>; auth?: boolean } = {}
@@ -1854,15 +2088,9 @@ index 000000000..4ee489aab
 +  const value = key ? String(body[key]) : "";
 +  return key ? `${path}${path.includes("?") ? "&" : "?"}${key}=${encodeURIComponent(value)}` : path;
 +};
-+
-+const projectRefBody = (project?: CodexFleetProjectRef): { project_id?: number; plane_project_id?: string } => {
-+  if (!project) return {};
-+  if (typeof project === "number") return { project_id: project };
-+  return { plane_project_id: project.plane_project_id };
-+};
 diff --git a/apps/web/app/codex-fleet/onboarding.tsx b/apps/web/app/codex-fleet/onboarding.tsx
 new file mode 100644
-index 000000000..57ae17a6b
+index 000000000..c21278c59
 --- /dev/null
 +++ b/apps/web/app/codex-fleet/onboarding.tsx
 @@ -0,0 +1,235 @@
@@ -1890,7 +2118,7 @@ index 000000000..57ae17a6b
 +export default function CodexFleetOnboarding() {
 +  const [apiUrl, setApiUrl] = useState(() => readBootstrapParams().apiUrl);
 +  const [path, setPath] = useState(() => readBootstrapParams().path);
-+  const [showManualPath, setShowManualPath] = useState(false);
++  const [showManualPath, setShowManualPath] = useState(true);
 +  const [token, setToken] = useState(() => readBootstrapParams().token);
 +  const [message, setMessage] = useState("Choose a project folder.");
 +  const [project, setProject] = useState<CodexFleetProject | null>(null);
@@ -1938,7 +2166,7 @@ index 000000000..57ae17a6b
 +  };
 +
 +  const dashboardUrl = `/codex-fleet/projects/#${new URLSearchParams({
-+    apiUrl: apiUrl.trim() || "http://127.0.0.1:8790",
++    apiUrl: apiUrl.trim() || "http://127.0.0.1:18790",
 +    token: token.trim(),
 +  }).toString()}`;
 +
@@ -1988,7 +2216,7 @@ index 000000000..57ae17a6b
 +            Local API
 +            <input
 +              className="h-11 rounded-md border border-white/10 bg-black/30 px-3 text-white outline-none focus:border-cyan-300"
-+              placeholder="http://127.0.0.1:8790"
++              placeholder="http://127.0.0.1:18790"
 +              value={apiUrl}
 +              onChange={(event) => setApiUrl(event.target.value)}
 +            />
@@ -2103,15 +2331,15 @@ index 000000000..57ae17a6b
 +}
 diff --git a/apps/web/app/codex-fleet/work-item-run-panel.tsx b/apps/web/app/codex-fleet/work-item-run-panel.tsx
 new file mode 100644
-index 000000000..8fdcf40c5
+index 000000000..3c01b4aba
 --- /dev/null
 +++ b/apps/web/app/codex-fleet/work-item-run-panel.tsx
-@@ -0,0 +1,296 @@
+@@ -0,0 +1,447 @@
 +import type { MouseEvent, SyntheticEvent } from "react";
 +import { useEffect, useMemo, useState } from "react";
 +
 +import { CodexFleetLocalApi } from "./local-api";
-+import type { CodexFleetRun } from "./local-api";
++import type { CodexFleetRun, CodexFleetTaskMetadata } from "./local-api";
 +
 +type Props = {
 +  workItemId: string;
@@ -2126,9 +2354,9 @@ index 000000000..8fdcf40c5
 +};
 +
 +const readLocalSettings = (): LocalSettings => {
-+  if (typeof window === "undefined") return { apiUrl: "http://127.0.0.1:8790", token: "" };
++  if (typeof window === "undefined") return { apiUrl: "http://127.0.0.1:18790", token: "" };
 +  return {
-+    apiUrl: window.localStorage.getItem("codexFleetLocalApiUrl") || "http://127.0.0.1:8790",
++    apiUrl: window.localStorage.getItem("codexFleetLocalApiUrl") || "http://127.0.0.1:18790",
 +    token: window.localStorage.getItem("codexFleetLocalToken") || "",
 +  };
 +};
@@ -2141,9 +2369,37 @@ index 000000000..8fdcf40c5
 +  return "Task";
 +};
 +
++const friendlyValue = (value: unknown) =>
++  ({
++    never: "Auto local edits",
++    "on-request": "Ask before risky actions",
++    untrusted: "Untrusted sandbox",
++    review_and_approve: "Assisted",
++    agent_task_planner: "Full Agent",
++    manual: "Manual",
++  })[String(value)] ?? String(value);
++
++const friendlyEvent = (kind: string) =>
++  ({
++    claimed: "Claimed",
++    workspace_prepared: "Workspace ready",
++    runner_started: "Codex started",
++    runner_finished: "Codex completed",
++    needs_input: "Needs input",
++    proposed_task_created: "Child task created",
++    parent_blocked: "Parent blocked",
++    parent_children_completed: "Ready for human review",
++    retry_requested: "Retry requested",
++    cancel_requested: "Cancel requested",
++    cancelled: "Cancelled",
++  })[kind] ?? kind.replaceAll("_", " ");
++
 +export function CodexFleetWorkItemRunPanel({ workItemId, planeProjectId, identifier, labels }: Props) {
 +  const [settings, setSettings] = useState(readLocalSettings);
 +  const [run, setRun] = useState<CodexFleetRun | null>(null);
++  const [children, setChildren] = useState<CodexFleetTaskMetadata[]>([]);
++  const [parent, setParent] = useState<CodexFleetTaskMetadata | null>(null);
++  const [answer, setAnswer] = useState("");
 +  const [message, setMessage] = useState("Ready for codex-fleet.");
 +  const [busy, setBusy] = useState(false);
 +
@@ -2162,10 +2418,58 @@ index 000000000..8fdcf40c5
 +    setBusy(true);
 +    try {
 +      const result = await api.runStatus(workItemId, projectRef);
++      const [childResult, parentResult] = await Promise.all([
++        api.workItemChildren(workItemId, projectRef).catch(() => ({ children: [] })),
++        api.workItemParent(workItemId, projectRef).catch(() => ({ parent: null })),
++      ]);
 +      setRun(result.run);
++      setChildren(childResult.children);
++      setParent(parentResult.parent);
 +      setMessage(result.run ? `Latest run: ${result.run.status}.` : "No codex-fleet run recorded yet.");
 +    } catch (error) {
 +      setMessage(error instanceof Error ? error.message : "codex-fleet status unavailable.");
++    } finally {
++      setBusy(false);
++    }
++  };
++
++  const retryWorkItem = async () => {
++    if (!canConnect) return;
++    setBusy(true);
++    try {
++      const result = await api.retryWorkItem(workItemId, projectRef);
++      setRun(result.previous_run);
++      setMessage(`Moved ${identifier} to ${result.state}.`);
++    } catch (error) {
++      setMessage(error instanceof Error ? error.message : "codex-fleet could not retry this work item.");
++    } finally {
++      setBusy(false);
++    }
++  };
++
++  const cancelWorkItem = async () => {
++    if (!canConnect) return;
++    setBusy(true);
++    try {
++      const result = await api.cancelWorkItem(workItemId, projectRef);
++      setRun(result.run);
++      setMessage(`Moved ${identifier} to ${result.state}.`);
++    } catch (error) {
++      setMessage(error instanceof Error ? error.message : "codex-fleet could not cancel this work item.");
++    } finally {
++      setBusy(false);
++    }
++  };
++
++  const answerInput = async () => {
++    if (!canConnect || !answer.trim()) return;
++    setBusy(true);
++    try {
++      await api.answerInput(workItemId, answer.trim(), projectRef);
++      setAnswer("");
++      setMessage("Answer saved. The task is back in Ready.");
++    } catch (error) {
++      setMessage(error instanceof Error ? error.message : "codex-fleet could not save the answer.");
 +    } finally {
 +      setBusy(false);
 +    }
@@ -2228,6 +2532,22 @@ index 000000000..8fdcf40c5
 +          >
 +            Run with Codex
 +          </button>
++          <button
++            type="button"
++            className="h-8 rounded-md border border-subtle px-3 text-xs font-medium text-primary hover:bg-surface-2 disabled:opacity-50"
++            disabled={busy}
++            onClick={() => void retryWorkItem()}
++          >
++            Retry
++          </button>
++          <button
++            type="button"
++            className="h-8 rounded-md border border-danger-primary/40 px-3 text-xs font-medium text-danger-primary hover:bg-danger-50 disabled:opacity-50"
++            disabled={busy}
++            onClick={() => void cancelWorkItem()}
++          >
++            Cancel
++          </button>
 +        </div>
 +      </div>
 +      {run && (
@@ -2247,6 +2567,34 @@ index 000000000..8fdcf40c5
 +                <dd className="truncate text-primary">{run.branch_name}</dd>
 +              </div>
 +            )}
++            <div className="min-w-0">
++              <dt className="text-tertiary">Agent</dt>
++              <dd className="truncate text-primary">{run.agent_name || run.agent_role || "Worker"}</dd>
++            </div>
++            {run.model && (
++              <div className="min-w-0">
++                <dt className="text-tertiary">Model</dt>
++                <dd className="truncate text-primary">{run.model}</dd>
++              </div>
++            )}
++            {run.settings?.approval_policy && (
++              <div className="min-w-0">
++                <dt className="text-tertiary">Local edit approval</dt>
++                <dd className="truncate text-primary">{friendlyValue(run.settings.approval_policy)}</dd>
++              </div>
++            )}
++            {run.settings?.automation_mode && (
++              <div className="min-w-0">
++                <dt className="text-tertiary">Automation</dt>
++                <dd className="truncate text-primary">{friendlyValue(run.settings.automation_mode)}</dd>
++              </div>
++            )}
++            {run.token_usage?.total_tokens && (
++              <div className="min-w-0">
++                <dt className="text-tertiary">Tokens</dt>
++                <dd className="truncate text-primary">{run.token_usage.total_tokens.toLocaleString()}</dd>
++              </div>
++            )}
 +            {run.worktree_path && (
 +              <div className="min-w-0">
 +                <dt className="text-tertiary">Worktree</dt>
@@ -2261,6 +2609,37 @@ index 000000000..8fdcf40c5
 +            )}
 +          </dl>
 +
++          {(parent || children.length > 0) && (
++            <div className="rounded-md border border-subtle bg-surface-2 p-3 text-xs">
++              <div className="mb-2 font-semibold text-primary">Task graph</div>
++              {parent ? <p className="text-secondary">Parent: {parent.parent_identifier || parent.parent_item_id}</p> : null}
++              {children.length ? (
++                <div className="mt-2 grid gap-1">
++                  {children.map((child) => (
++                    <div key={child.item_id} className="rounded border border-subtle bg-surface-1 px-2 py-1 text-secondary">
++                      {child.item_id} · {child.role || "worker"} · depth {child.depth}
++                    </div>
++                  ))}
++                </div>
++              ) : null}
++            </div>
++          )}
++
++          {run.status === "needs_input" && (
++            <div className="grid gap-2 rounded-md border border-subtle bg-surface-2 p-3 text-xs">
++              <div className="font-semibold text-primary">Answer needed</div>
++              <textarea
++                className="min-h-20 rounded border border-subtle bg-surface-1 p-2 text-primary"
++                value={answer}
++                onChange={(event) => setAnswer(event.target.value)}
++                placeholder="Answer the agent question, then codex-fleet will move this task back to Ready."
++              />
++              <button type="button" className="h-8 w-max rounded bg-custom-primary-100 px-3 font-semibold text-white" onClick={() => void answerInput()}>
++                Save answer
++              </button>
++            </div>
++          )}
++
 +          {run.events && run.events.length > 0 && (
 +            <div className="rounded-md border border-subtle bg-surface-2 p-3">
 +              <div className="mb-2 text-xs font-semibold text-primary">Timeline</div>
@@ -2268,7 +2647,7 @@ index 000000000..8fdcf40c5
 +                {run.events.slice(-8).map((event) => (
 +                  <li key={event.id} className="grid gap-1 border-l border-subtle pl-3 text-xs">
 +                    <div className="flex items-center justify-between gap-2">
-+                      <span className="font-medium text-primary">{event.kind.replaceAll("_", " ")}</span>
++                      <span className="font-medium text-primary">{friendlyEvent(event.kind)}</span>
 +                      <span className="shrink-0 text-tertiary">{event.created_at}</span>
 +                    </div>
 +                    {Object.keys(event.payload).length > 0 && (
@@ -2403,8 +2782,20 @@ index 000000000..8fdcf40c5
 +    </div>
 +  );
 +}
+diff --git a/apps/web/app/entry.client.tsx b/apps/web/app/entry.client.tsx
+index 9c665ede0..ddb7bede9 100644
+--- a/apps/web/app/entry.client.tsx
++++ b/apps/web/app/entry.client.tsx
+@@ -4,6 +4,7 @@
+  * See the LICENSE file for details.
+  */
+
++import "@/lib/polyfills";
+ import { startTransition, StrictMode } from "react";
+ import { hydrateRoot } from "react-dom/client";
+ import { HydratedRouter } from "react-router/dom";
 diff --git a/apps/web/app/error/prod.tsx b/apps/web/app/error/prod.tsx
-index a8d61829e..56209ff38 100644
+index a8d61829e..cc02749e5 100644
 --- a/apps/web/app/error/prod.tsx
 +++ b/apps/web/app/error/prod.tsx
 @@ -17,17 +17,17 @@ const linkMap = [
@@ -2418,34 +2809,34 @@ index a8d61829e..56209ff38 100644
      key: "status",
      label: "Status Page",
 -    value: "https://status.plane.so/",
-+    value: "http://127.0.0.1:8790/api/status",
++    value: "http://127.0.0.1:18790/api/status",
    },
    {
      key: "twitter_handle",
 -    label: "@planepowers",
 -    value: "https://x.com/planepowers",
 +    label: "codex-fleet",
-+    value: "http://127.0.0.1:8080/",
++    value: "http://127.0.0.1:17880/",
    },
  ];
- 
+
 diff --git a/apps/web/app/layout.tsx b/apps/web/app/layout.tsx
-index df5a8daf3..6af66c557 100644
+index df5a8daf3..f967c111d 100644
 --- a/apps/web/app/layout.tsx
 +++ b/apps/web/app/layout.tsx
 @@ -9,8 +9,6 @@ import Script from "next/script";
  // styles
  import "@/styles/globals.css";
- 
+
 -import { SITE_DESCRIPTION, SITE_NAME } from "@plane/constants";
 -
  // helpers
  import { cn } from "@plane/utils";
- 
+
 @@ -24,35 +22,37 @@ import icon512 from "@/app/assets/icons/icon-512x512.png?url";
  // local
  import { AppProvider } from "./provider";
- 
+
 +const APP_TITLE = "codex-fleet | Local Codex agent control center";
 +const APP_DESCRIPTION = "Local Codex agent control center for project work.";
 +
@@ -2474,7 +2865,7 @@ index df5a8daf3..6af66c557 100644
    },
 -  { property: "og:url", content: "https://app.plane.so/" },
 -  { property: "og:image", content: "https://app.plane.so/og-image.png" },
-+  { property: "og:url", content: "http://127.0.0.1:8080/" },
++  { property: "og:url", content: "http://127.0.0.1:17880/" },
 +  { property: "og:image", content: "/og-image.png" },
    { property: "og:image:width", content: "1200" },
    { property: "og:image:height", content: "630" },
@@ -2490,7 +2881,7 @@ index df5a8daf3..6af66c557 100644
 -  { name: "twitter:image:alt", content: "Plane - Modern project management" },
 +  { name: "twitter:image:alt", content: "codex-fleet local Codex agent control center" },
  ];
- 
+
  export default function RootLayout({ children }: { children: React.ReactNode }) {
 @@ -61,16 +61,16 @@ export default function RootLayout({ children }: { children: React.ReactNode })
    return (
@@ -2513,7 +2904,7 @@ index df5a8daf3..6af66c557 100644
          <meta name="mobile-web-app-capable" content="yes" />
          <link rel="apple-touch-icon" href={icon512} />
 diff --git a/apps/web/app/root.tsx b/apps/web/app/root.tsx
-index e9f46d014..acc401e27 100644
+index e9f46d014..a2aa25e02 100644
 --- a/apps/web/app/root.tsx
 +++ b/apps/web/app/root.tsx
 @@ -9,8 +9,6 @@ import Script from "next/script";
@@ -2528,11 +2919,11 @@ index e9f46d014..acc401e27 100644
 @@ -33,7 +31,8 @@ import interVariableWoff2 from "@fontsource-variable/inter/files/inter-latin-wgh
  import "@fontsource/material-symbols-rounded";
  import "@fontsource/ibm-plex-mono";
- 
+
 -const APP_TITLE = "Plane | Simple, extensible, open-source project management tool.";
 +const APP_TITLE = "codex-fleet | Local Codex agent control center";
 +const APP_DESCRIPTION = "Local Codex agent control center for project work.";
- 
+
  export const links: LinksFunction = () => [
    { rel: "icon", type: "image/png", sizes: "32x32", href: favicon32 },
 @@ -62,12 +61,12 @@ export function Layout({ children }: { children: ReactNode }) {
@@ -2552,7 +2943,7 @@ index e9f46d014..acc401e27 100644
          <meta name="mobile-web-app-capable" content="yes" />
          <Meta />
 @@ -96,28 +95,28 @@ export function Layout({ children }: { children: ReactNode }) {
- 
+
  export const meta: Route.MetaFunction = () => [
    { title: APP_TITLE },
 -  { name: "description", content: SITE_DESCRIPTION },
@@ -2564,7 +2955,7 @@ index e9f46d014..acc401e27 100644
 +    content: APP_DESCRIPTION,
    },
 -  { property: "og:url", content: "https://app.plane.so/" },
-+  { property: "og:url", content: "http://127.0.0.1:8080/" },
++  { property: "og:url", content: "http://127.0.0.1:17880/" },
    { property: "og:image", content: ogImage },
    { property: "og:image:width", content: "1200" },
    { property: "og:image:height", content: "630" },
@@ -2585,7 +2976,7 @@ index e9f46d014..acc401e27 100644
 -  { name: "twitter:image:alt", content: "Plane - Modern project management" },
 +  { name: "twitter:image:alt", content: "codex-fleet local Codex agent control center" },
  ];
- 
+
  export default function Root() {
 diff --git a/apps/web/app/routes/core.ts b/apps/web/app/routes/core.ts
 index c9c82bd24..a56303b9e 100644
@@ -2610,23 +3001,23 @@ index 452d214ad..40221b657 100644
 @@ -4,6 +4,10 @@
   * See the LICENSE file for details.
   */
- 
+
 +import { route } from "@react-router/dev/routes";
  import type { RouteConfigEntry } from "@react-router/dev/routes";
- 
+
 -export const extendedRoutes: RouteConfigEntry[] = [];
 +export const extendedRoutes: RouteConfigEntry[] = [
 +  route("codex-fleet/onboarding", "./codex-fleet/onboarding.tsx"),
 +  route("codex-fleet/dashboard", "./codex-fleet/dashboard.tsx"),
 +];
 diff --git a/apps/web/ce/components/projects/create/root.tsx b/apps/web/ce/components/projects/create/root.tsx
-index 3e4b5b416..0b0c76928 100644
+index 3e4b5b416..9e5aa1e5d 100644
 --- a/apps/web/ce/components/projects/create/root.tsx
 +++ b/apps/web/ce/components/projects/create/root.tsx
 @@ -4,7 +4,7 @@
   * See the LICENSE file for details.
   */
- 
+
 -import { useState } from "react";
 +import { useEffect, useState } from "react";
  import { observer } from "mobx-react";
@@ -2641,7 +3032,7 @@ index 3e4b5b416..0b0c76928 100644
  import type { TProject } from "@/plane-web/types/projects";
  import { ProjectAttributes } from "./attributes";
  import { getProjectFormValues } from "./utils";
- 
+
 +type CodexFleetProjectMode = "link" | "create";
 +type CodexFleetProjectType = "blank" | "simple-web" | "node-next" | "python";
 +type CodexFleetAgentTaskMode = "review_and_approve" | "agent_task_planner";
@@ -2666,7 +3057,7 @@ index 3e4b5b416..0b0c76928 100644
 +  const [localProjectPath, setLocalProjectPath] = useState("");
 +  const [localProjectParentPath, setLocalProjectParentPath] = useState("");
 +  const [localProjectType, setLocalProjectType] = useState<CodexFleetProjectType>("blank");
-+  const [showManualPath, setShowManualPath] = useState(false);
++  const [showManualPath, setShowManualPath] = useState(true);
 +  const [applyHarness, setApplyHarness] = useState(true);
 +  const [initialGoal, setInitialGoal] = useState("");
 +  const [startInitialGoal, setStartInitialGoal] = useState(true);
@@ -2697,14 +3088,14 @@ index 3e4b5b416..0b0c76928 100644
    const { isMobile } = usePlatformOS();
    const handleAddToFavorites = (projectId: string) => {
      if (!workspaceSlug) return;
-@@ -60,9 +99,251 @@ export const CreateProjectForm = observer(function CreateProjectForm(props: TCre
+@@ -60,9 +99,252 @@ export const CreateProjectForm = observer(function CreateProjectForm(props: TCre
      });
    };
- 
+
 +  const localSettings = () => {
-+    if (typeof window === "undefined") return { apiUrl: "http://127.0.0.1:8790", token: "" };
++    if (typeof window === "undefined") return { apiUrl: "http://127.0.0.1:18790", token: "" };
 +    const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
-+    const apiUrl = hash.get("apiUrl") || window.localStorage.getItem("codexFleetLocalApiUrl") || "http://127.0.0.1:8790";
++    const apiUrl = hash.get("apiUrl") || window.localStorage.getItem("codexFleetLocalApiUrl") || "http://127.0.0.1:18790";
 +    const token = hash.get("token") || window.localStorage.getItem("codexFleetLocalToken") || "";
 +    if (hash.get("apiUrl")) window.localStorage.setItem("codexFleetLocalApiUrl", apiUrl);
 +    if (hash.get("token")) window.localStorage.setItem("codexFleetLocalToken", token);
@@ -2715,7 +3106,7 @@ index 3e4b5b416..0b0c76928 100644
 +    if (typeof window === "undefined") return false;
 +    const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
 +    const code = hash.get("code");
-+    const apiUrl = hash.get("apiUrl") || window.localStorage.getItem("codexFleetLocalApiUrl") || "http://127.0.0.1:8790";
++    const apiUrl = hash.get("apiUrl") || window.localStorage.getItem("codexFleetLocalApiUrl") || "http://127.0.0.1:18790";
 +    if (!code) return false;
 +    const result = await new CodexFleetLocalApi({ baseUrl: apiUrl }).exchangeSessionCode(code);
 +    window.localStorage.setItem("codexFleetLocalApiUrl", result.apiUrl || apiUrl);
@@ -2902,6 +3293,7 @@ index 3e4b5b416..0b0c76928 100644
 +          initial_goal: initialGoal.trim() || undefined,
 +          start_initial_goal: startInitialGoal,
 +          agent_task_mode: agentTaskMode,
++          require_plane_mapping: true,
 +          codex_settings: {
 +            runner_mode: runnerMode,
 +            default_model: defaultModel,
@@ -2940,7 +3332,7 @@ index 3e4b5b416..0b0c76928 100644
 +        });
 +        setToast({
 +          type: TOAST_TYPE.ERROR,
-+          title: "codex-fleet project mapping failed",
++          title: "codex-fleet project setup failed",
 +          message: error instanceof Error ? error.message : "The local folder was not mapped.",
 +        });
 +        return Promise.reject(error);
@@ -2948,8 +3340,8 @@ index 3e4b5b416..0b0c76928 100644
 +    }
      const coverImage = formData.cover_image_url;
      let uploadedAssetUrl: string | null = null;
- 
-@@ -176,6 +457,271 @@ export const CreateProjectForm = observer(function CreateProjectForm(props: TCre
+
+@@ -176,6 +458,270 @@ export const CreateProjectForm = observer(function CreateProjectForm(props: TCre
              setShouldAutoSyncIdentifier={setShouldAutoSyncIdentifier}
            />
            <ProjectAttributes isMobile={isMobile} />
@@ -3051,7 +3443,6 @@ index 3e4b5b416..0b0c76928 100644
 +                  type="button"
 +                  className="h-10 rounded-md border border-custom-border-200 px-3 text-xs font-semibold text-custom-text-200 hover:bg-custom-background-80 disabled:cursor-not-allowed disabled:opacity-50"
 +                  onClick={() => setShowManualPath((value) => !value)}
-+                  disabled={localConnectionState !== "connected"}
 +                >
 +                  {showManualPath ? "Hide path field" : "Paste path"}
 +                </button>
@@ -3261,6 +3652,267 @@ index 239d65829..a5888e105 100644
      },
    },
  };
+diff --git a/apps/web/core/components/analytics/work-items/modal/content.tsx b/apps/web/core/components/analytics/work-items/modal/content.tsx
+index 259dec20c..816c17ba2 100644
+--- a/apps/web/core/components/analytics/work-items/modal/content.tsx
++++ b/apps/web/core/components/analytics/work-items/modal/content.tsx
+@@ -4,19 +4,20 @@
+  * See the LICENSE file for details.
+  */
+
+-import React, { useEffect, useState } from "react";
++import { useEffect, useMemo, useState } from "react";
+ import { observer } from "mobx-react";
+-import { Tab } from "@headlessui/react";
+ // plane package imports
+ import type { ICycle, IModule, IProject } from "@plane/types";
+ import { Spinner } from "@plane/ui";
+-// hooks
+-import { useAnalytics } from "@/hooks/store/use-analytics";
+-// plane web components
+-import TotalInsights from "../../total-insights";
+-import CreatedVsResolved from "../created-vs-resolved";
+-import CustomizedInsights from "../customized-insights";
+-import WorkItemsInsightTable from "../workitems-insight-table";
++// codex-fleet
++import {
++  CodexFleetLocalApi,
++  DEFAULT_CODEX_FLEET_API_URL,
++  ensureCodexFleetLocalConnection,
++  readCodexFleetLocalConnection,
++  type CodexFleetLocalConnection,
++  type CodexFleetLogs,
++} from "@/app/codex-fleet/local-api";
+
+ type Props = {
+   fullScreen: boolean;
+@@ -27,61 +28,173 @@ type Props = {
+ };
+
+ export const WorkItemsModalMainContent = observer(function WorkItemsModalMainContent(props: Props) {
+-  const { projectDetails, cycleDetails, moduleDetails, fullScreen, isEpic } = props;
+-  const { updateSelectedProjects, updateSelectedCycle, updateSelectedModule, updateIsPeekView } = useAnalytics();
+-  const [isModalConfigured, setIsModalConfigured] = useState(false);
+-
+-  useEffect(() => {
+-    updateIsPeekView(true);
++  const { projectDetails } = props;
++  const [settings, setSettings] = useState<CodexFleetLocalConnection>(() => readCodexFleetLocalConnection());
++  const [logs, setLogs] = useState<CodexFleetLogs | null>(null);
++  const [message, setMessage] = useState("Loading codex-fleet logs...");
++  const [loading, setLoading] = useState(false);
++  const api = useMemo(
++    () => new CodexFleetLocalApi({ baseUrl: settings.apiUrl, token: settings.token || null }),
++    [settings.apiUrl, settings.token]
++  );
+
+-    // Handle project selection
+-    if (projectDetails?.id) {
+-      updateSelectedProjects([projectDetails.id]);
++  const load = async () => {
++    if (!projectDetails?.id) {
++      setMessage("Open Fleet Logs from a project board.");
++      return;
+     }
+-
+-    // Handle cycle selection
+-    if (cycleDetails?.id) {
+-      updateSelectedCycle(cycleDetails.id);
++    if (!settings.token) {
++      setMessage("Local launcher token missing. Start codex-fleet with make up and use the opened Plane URL.");
++      return;
+     }
+-
+-    // Handle module selection
+-    if (moduleDetails?.id) {
+-      updateSelectedModule(moduleDetails.id);
++    setLoading(true);
++    setMessage("Loading codex-fleet logs...");
++    try {
++      const result = await api.fleetLogs(projectDetails.id);
++      setLogs(result.fleet_logs);
++      setMessage(result.fleet_logs.message || "Fleet Logs loaded.");
++    } catch (error) {
++      setMessage(error instanceof Error ? error.message : "codex-fleet logs unavailable.");
++    } finally {
++      setLoading(false);
+     }
+-    setIsModalConfigured(true);
++  };
+
+-    // Cleanup fields
++  useEffect(() => {
++    let mounted = true;
++    ensureCodexFleetLocalConnection()
++      .then((connection) => {
++        if (mounted) setSettings(connection);
++      })
++      .catch((error) => {
++        if (mounted) {
++          setSettings({ apiUrl: DEFAULT_CODEX_FLEET_API_URL, token: "" });
++          setMessage(error instanceof Error ? error.message : "Local launcher session expired. Reopen Plane from make up.");
++        }
++      });
+     return () => {
+-      updateSelectedProjects([]);
+-      updateSelectedCycle("");
+-      updateSelectedModule("");
+-      updateIsPeekView(false);
++      mounted = false;
+     };
+-  }, [
+-    projectDetails?.id,
+-    cycleDetails?.id,
+-    moduleDetails?.id,
+-    updateSelectedProjects,
+-    updateSelectedCycle,
+-    updateSelectedModule,
+-    updateIsPeekView,
+-  ]);
++  }, []);
++
++  useEffect(() => {
++    void load();
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [projectDetails?.id, settings.token, settings.apiUrl]);
+
+-  if (!isModalConfigured)
++  if (loading && !logs) {
+     return (
+       <div className="flex h-full items-center justify-center">
+         <Spinner />
+       </div>
+     );
++  }
+
+   return (
+-    <Tab.Group as={React.Fragment}>
+-      <div className="flex flex-col gap-14 overflow-y-auto p-6">
+-        <TotalInsights analyticsType="work-items" peekView={!fullScreen} />
+-        <CreatedVsResolved />
+-        <CustomizedInsights peekView={!fullScreen} isEpic={isEpic} />
+-        <WorkItemsInsightTable />
++    <div className="grid gap-4 overflow-y-auto p-6">
++      <div className="flex flex-wrap items-start justify-between gap-3 rounded-lg border border-subtle bg-surface-2 p-4">
++        <div>
++          <h3 className="text-base font-semibold text-primary">Fleet Logs</h3>
++          <p className="mt-1 text-sm text-secondary">{message}</p>
++          {logs?.repo ? <p className="mt-2 break-all text-xs text-tertiary">{logs.repo}</p> : null}
++          {logs?.linked === false ? (
++            <p className="mt-2 break-all text-xs text-tertiary">Plane project {logs.plane_project_id}</p>
++          ) : null}
++        </div>
++        <button
++          type="button"
++          className="h-8 rounded-md border border-subtle px-3 text-xs font-semibold text-primary hover:bg-surface-1"
++          onClick={() => void load()}
++        >
++          Refresh
++        </button>
+       </div>
+-    </Tab.Group>
++
++      {logs ? (
++        <>
++          <div className="grid gap-3 md:grid-cols-4">
++            <Metric label="Runs" value={String(logs.analytics.runs_total)} />
++            <Metric label="Active" value={String(logs.analytics.active_runs)} />
++            <Metric label="Tokens" value={String(logs.analytics.total_tokens || 0)} />
++            <Metric label="Tasks" value={String(logs.tasks.length)} />
++          </div>
++
++          <section className="grid gap-3 rounded-lg border border-subtle bg-surface-2 p-4">
++            <h4 className="text-sm font-semibold text-primary">Virtual agents</h4>
++            <div className="grid gap-2 md:grid-cols-2">
++              {logs.analytics.by_role.length ? (
++                logs.analytics.by_role.map((agent) => (
++                  <div key={agent.role} className="rounded-md border border-subtle bg-surface-1 p-3 text-xs">
++                    <div className="flex items-center justify-between gap-3">
++                      <span className="font-semibold text-primary">{agent.role}</span>
++                      <span className="text-tertiary">{agent.runs} runs</span>
++                    </div>
++                    <p className="mt-2 text-secondary">
++                      success {agent.success} - failed {agent.failed} - active {agent.active} - cancelled {agent.cancelled}
++                    </p>
++                    <p className="mt-1 text-tertiary">tokens {agent.total_tokens || 0}</p>
++                  </div>
++                ))
++              ) : (
++                <p className="text-sm text-secondary">No agent runs recorded yet.</p>
++              )}
++            </div>
++          </section>
++
++          <section className="grid gap-3 rounded-lg border border-subtle bg-surface-2 p-4">
++            <h4 className="text-sm font-semibold text-primary">Task tree</h4>
++            {logs.tasks.length ? (
++              logs.tasks.map((task) => (
++                <div key={task.item_id} className="rounded-md border border-subtle bg-surface-1 p-3 text-xs">
++                  <div className="flex flex-wrap items-center justify-between gap-2">
++                    <span className="font-semibold text-primary">{task.source}</span>
++                    <span className="text-tertiary">depth {task.depth}</span>
++                  </div>
++                  <p className="mt-2 break-all text-secondary">
++                    item {task.item_id}
++                    {task.parent_identifier ? ` - parent ${task.parent_identifier}` : ""}
++                  </p>
++                  {task.latest_run ? (
++                    <p className="mt-1 text-tertiary">
++                      latest {task.latest_run.status} - {task.latest_run.agent_name || task.latest_run.agent_role || "agent"}
++                    </p>
++                  ) : null}
++                </div>
++              ))
++            ) : (
++              <p className="text-sm text-secondary">No child or delivery tasks recorded yet.</p>
++            )}
++          </section>
++
++          <section className="grid gap-3 rounded-lg border border-subtle bg-surface-2 p-4">
++            <h4 className="text-sm font-semibold text-primary">Recent events</h4>
++            {logs.recent_events.length ? (
++              <ol className="grid gap-2">
++                {logs.recent_events.slice(0, 30).map((event) => (
++                  <li key={`${event.run_id || "run"}-${event.id}`} className="border-l border-subtle pl-3 text-xs">
++                    <div className="flex flex-wrap items-center justify-between gap-2">
++                      <span className="font-medium text-primary">{event.kind.replaceAll("_", " ")}</span>
++                      <span className="text-tertiary">{event.created_at}</span>
++                    </div>
++                    <p className="mt-1 break-all text-secondary">run {event.run_id || "unknown"}</p>
++                  </li>
++                ))}
++              </ol>
++            ) : (
++              <p className="text-sm text-secondary">No events recorded yet.</p>
++            )}
++          </section>
++        </>
++      ) : null}
++    </div>
+   );
+ });
++
++function Metric({ label, value }: { label: string; value: string }) {
++  return (
++    <div className="rounded-lg border border-subtle bg-surface-2 p-4">
++      <p className="text-xs font-medium text-tertiary">{label}</p>
++      <p className="mt-2 text-2xl font-semibold text-primary">{value}</p>
++    </div>
++  );
++}
+diff --git a/apps/web/core/components/analytics/work-items/modal/header.tsx b/apps/web/core/components/analytics/work-items/modal/header.tsx
+index c515deb98..af244b80f 100644
+--- a/apps/web/core/components/analytics/work-items/modal/header.tsx
++++ b/apps/web/core/components/analytics/work-items/modal/header.tsx
+@@ -26,7 +26,7 @@ export const WorkItemsModalHeader = observer(function WorkItemsModalHeader(props
+   return (
+     <div className="flex items-center justify-between gap-4 bg-surface-1 px-5 py-4 text-13">
+       <h3 className="break-words">
+-        Analytics for {title} {cycle && `in ${cycle.name}`} {module && `in ${module.name}`}
++        Fleet Logs for {title} {cycle && `in ${cycle.name}`} {module && `in ${module.name}`}
+       </h3>
+       <div className="flex items-center gap-2">
+         <button
 diff --git a/apps/web/core/components/common/logo-spinner.tsx b/apps/web/core/components/common/logo-spinner.tsx
 index 9dfad1d86..da7defe35 100644
 --- a/apps/web/core/components/common/logo-spinner.tsx
@@ -3268,7 +3920,7 @@ index 9dfad1d86..da7defe35 100644
 @@ -4,19 +4,31 @@
   * See the LICENSE file for details.
   */
- 
+
 -import { useTheme } from "next-themes";
 -// assets
 -import LogoSpinnerDark from "@/app/assets/images/logo-spinner-dark.gif?url";
@@ -3308,6 +3960,19 @@ index 9dfad1d86..da7defe35 100644
      </div>
    );
  }
+diff --git a/apps/web/core/components/issues/filters.tsx b/apps/web/core/components/issues/filters.tsx
+index 0bedecfa7..3c6e02f70 100644
+--- a/apps/web/core/components/issues/filters.tsx
++++ b/apps/web/core/components/issues/filters.tsx
+@@ -127,7 +127,7 @@ export const HeaderFilters = observer(function HeaderFilters(props: Props) {
+       </FiltersDropdown>
+       {canUserCreateIssue ? (
+         <Button className="hidden px-2 md:block" onClick={() => setAnalyticsModal(true)} variant="secondary" size="lg">
+-          <div className="hidden @4xl:flex">{t("common.analytics")}</div>
++          <div className="hidden @4xl:flex">Fleet Logs</div>
+           <div className="flex @4xl:hidden">
+             <ChartNoAxesColumn className="size-3.5" />
+           </div>
 diff --git a/apps/web/core/components/issues/issue-detail/main-content.tsx b/apps/web/core/components/issues/issue-detail/main-content.tsx
 index d14bd3539..20cf03d9b 100644
 --- a/apps/web/core/components/issues/issue-detail/main-content.tsx
@@ -3324,7 +3989,7 @@ index d14bd3539..20cf03d9b 100644
 @@ -196,6 +198,15 @@ export const IssueMainContent = observer(function IssueMainContent(props: Props)
          issueServiceType={EIssueServiceType.ISSUES}
        />
- 
+
 +      <CodexFleetWorkItemRunPanel
 +        workItemId={issue.id}
 +        planeProjectId={issue.project_id}
@@ -3356,7 +4021,7 @@ index c9531328f..3609a7962 100644
 +  identifier: string;
    isEpic?: boolean;
  }
- 
+
  const KanbanIssueDetailsBlock = observer(function KanbanIssueDetailsBlock(props: IssueDetailsBlockProps) {
 -  const { cardRef, issue, updateIssue, quickActions, isReadOnly, displayProperties, isEpic = false } = props;
 +  const { cardRef, issue, updateIssue, quickActions, isReadOnly, displayProperties, identifier, isEpic = false } = props;
@@ -3366,7 +4031,7 @@ index c9531328f..3609a7962 100644
 @@ -140,6 +142,17 @@ const KanbanIssueDetailsBlock = observer(function KanbanIssueDetailsBlock(props:
          isEpic={isEpic}
        />
- 
+
 +      {issue.project_id && !isEpic && (
 +        <CodexFleetWorkItemRunCompact
 +          workItemId={issue.id}
@@ -3419,7 +4084,7 @@ index 2c536b2aa..a42a713df 100644
                  className={cn("hidden", {
                    "md:flex": isSidebarCollapsed,
 diff --git a/apps/web/core/components/issues/issue-modal/form.tsx b/apps/web/core/components/issues/issue-modal/form.tsx
-index 33d7c5993..09c591331 100644
+index 33d7c5993..f5a57a451 100644
 --- a/apps/web/core/components/issues/issue-modal/form.tsx
 +++ b/apps/web/core/components/issues/issue-modal/form.tsx
 @@ -105,6 +105,10 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
@@ -3430,13 +4095,13 @@ index 33d7c5993..09c591331 100644
 +  const [codexReasoning, setCodexReasoning] = useState("low");
 +  const [codexTaskFlow, setCodexTaskFlow] = useState("project-default");
 +  const [codexSkills, setCodexSkills] = useState("");
- 
+
    // refs
    const editorRef = useRef<EditorRefApi>(null);
 @@ -238,13 +242,20 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
      )
        return;
- 
+
 +    const codexDescription = withCodexFleetTaskSettings(formData.description_html, {
 +      model: codexModel,
 +      reasoning_effort: codexReasoning,
@@ -3455,7 +4120,7 @@ index 33d7c5993..09c591331 100644
 +          description_html: codexDescription,
            type_id: getValues<"type_id">("type_id"),
          };
- 
+
 @@ -485,6 +496,64 @@ export const IssueFormRoot = observer(function IssueFormRoot(props: IssueFormPro
                  projectId={projectId}
                  workspaceSlug={workspaceSlug?.toString()}
@@ -3495,16 +4160,16 @@ index 33d7c5993..09c591331 100644
 +                    </select>
 +                  </label>
 +                  <label className="grid gap-1 text-xs font-medium text-secondary">
-+                    Follow-up tasks
++                    Automation mode
 +                    <select
 +                      className="h-9 rounded-md border border-subtle bg-surface-1 px-2 text-sm text-primary outline-none focus:border-custom-primary-100"
 +                      value={codexTaskFlow}
 +                      onChange={(event) => setCodexTaskFlow(event.target.value)}
 +                    >
-+                      <option value="project-default">project default</option>
-+                      <option value="agent_task_planner">auto-run within depth limit</option>
-+                      <option value="review_and_approve">create for review</option>
-+                      <option value="manual">do not create follow-ups</option>
++                      <option value="project-default">Project default</option>
++                      <option value="manual">Implement this task only</option>
++                      <option value="review_and_approve">Create follow-ups for review</option>
++                      <option value="agent_task_planner">Full Agent: split into runnable child tasks</option>
 +                    </select>
 +                  </label>
 +                </div>
@@ -3564,7 +4229,7 @@ index c9286d15f..bed103156 100644
 --- a/apps/web/core/components/project/card.tsx
 +++ b/apps/web/core/components/project/card.tsx
 @@ -40,6 +40,12 @@ type Props = {
- 
+
  export const ProjectCard = observer(function ProjectCard(props: Props) {
    const { project } = props;
 +  const isStockDemoProject =
@@ -3577,17 +4242,17 @@ index c9286d15f..bed103156 100644
    const [deleteProjectModalOpen, setDeleteProjectModal] = useState(false);
    const [joinProjectModalOpen, setJoinProjectModal] = useState(false);
 @@ -215,7 +221,7 @@ export const ProjectCard = observer(function ProjectCard(props: Props) {
- 
+
            <CoverImage
              src={project.cover_image_url}
 -            alt={project.name}
 +            alt={displayProjectName}
              className="absolute top-0 left-0 h-full w-full rounded-t"
            />
- 
+
 @@ -226,7 +232,7 @@ export const ProjectCard = observer(function ProjectCard(props: Props) {
                </div>
- 
+
                <div className="flex w-full flex-col justify-between gap-0.5 truncate">
 -                <h3 className="truncate font-semibold text-on-color">{project.name}</h3>
 +                <h3 className="truncate font-semibold text-on-color">{displayProjectName}</h3>
@@ -3605,13 +4270,41 @@ index c9286d15f..bed103156 100644
                : `Created on ${renderFormattedDate(project.created_at)}`}
            </p>
            <div className="item-center flex justify-between">
+diff --git a/apps/web/core/components/settings/project/sidebar/item-categories.tsx b/apps/web/core/components/settings/project/sidebar/item-categories.tsx
+index f94141c19..9fedb95b7 100644
+--- a/apps/web/core/components/settings/project/sidebar/item-categories.tsx
++++ b/apps/web/core/components/settings/project/sidebar/item-categories.tsx
+@@ -35,6 +35,23 @@ export const ProjectSettingsSidebarItemCategories = observer(function ProjectSet
+
+   return (
+     <div className="mt-3 flex flex-col divide-y divide-subtle px-3">
++      <div className="shrink-0 pb-3">
++        <div className="p-2 text-caption-md-medium text-tertiary capitalize">agent control</div>
++        <SettingsSidebarItem
++          as="link"
++          href={`/${workspaceSlug}/settings/projects/${projectId}/codex-fleet/`}
++          isActive={new RegExp(`^/${workspaceSlug}/settings/projects/${projectId}/codex-fleet/`).test(pathname)}
++          icon={PROJECT_SETTINGS_ICONS.codex_fleet}
++          label="Codex Fleet"
++        />
++        <SettingsSidebarItem
++          as="link"
++          href="/codex-fleet/dashboard"
++          isActive={pathname === "/codex-fleet/dashboard"}
++          icon={PROJECT_SETTINGS_ICONS.codex_fleet}
++          label="Fleet Logs"
++        />
++      </div>
+       {PROJECT_SETTINGS_CATEGORIES.map((category) => {
+         const categoryItems = GROUPED_PROJECT_SETTINGS[category];
+         const accessibleItems = categoryItems.filter((item) =>
 diff --git a/apps/web/core/components/settings/project/sidebar/item-icon.tsx b/apps/web/core/components/settings/project/sidebar/item-icon.tsx
 index 80d324b66..0542c21c3 100644
 --- a/apps/web/core/components/settings/project/sidebar/item-icon.tsx
 +++ b/apps/web/core/components/settings/project/sidebar/item-icon.tsx
 @@ -5,7 +5,7 @@
   */
- 
+
  import type { LucideIcon } from "lucide-react";
 -import { Users, Zap } from "lucide-react";
 +import { Bot, Users, Zap } from "lucide-react";
@@ -3621,7 +4314,7 @@ index 80d324b66..0542c21c3 100644
 @@ -22,7 +22,7 @@ import type { TProjectSettingsTabs } from "@plane/types";
  // components
  import { SettingIcon } from "@/components/icons/attachment";
- 
+
 -export const PROJECT_SETTINGS_ICONS: Record<TProjectSettingsTabs, LucideIcon | React.FC<ISvgIcons>> = {
 +export const PROJECT_SETTINGS_ICONS: Record<TProjectSettingsTabs | "codex_fleet", LucideIcon | React.FC<ISvgIcons>> = {
    general: SettingIcon,

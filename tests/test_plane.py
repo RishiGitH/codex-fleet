@@ -355,8 +355,8 @@ def test_plane_tracker_creates_agent_proposed_follow_up_item(tmp_path) -> None:
 
     assert result.dispatched is True
     assert api.items[1]["name"] == "Follow up in Plane"
-    assert api.items[1]["state_detail"] == {"name": "Ready"}
-    assert api.items[1]["label_details"] == [{"name": "agent-followup"}]
+    assert api.items[1]["state_detail"] == {"name": "Backlog"}
+    assert api.items[1]["label_details"] == [{"name": "agent-proposed"}]
     comments = "\n".join(comment for _, comment in api.comments)
     assert "Agent-proposed follow-up tasks" in comments
     assert "proposed this follow-up" in comments

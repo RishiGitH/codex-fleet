@@ -8,7 +8,7 @@ from codex_fleet.plane_views import (
 )
 
 
-def _write_plane_config(repo: Path, *, url: str = "http://127.0.0.1:8080") -> None:
+def _write_plane_config(repo: Path, *, url: str = "http://127.0.0.1:17880") -> None:
     repo.joinpath(".codex-fleet.yml").write_text(
         "repo: .\n"
         "tracker:\n"

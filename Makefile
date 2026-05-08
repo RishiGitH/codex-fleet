@@ -1,28 +1,35 @@
 .PHONY: install test lint doctor budget bootstrap smoke local-check full-local-check up demo down plane-up plane-status plane-bootstrap plane-source plane-verify plane-fork-preview plane-fork-prepare plane-fork-clone docker-up docker-down
 
-PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
-PYTEST ?= $(if $(wildcard .venv/bin/pytest),.venv/bin/pytest,pytest)
-RUFF ?= $(if $(wildcard .venv/bin/ruff),.venv/bin/ruff,ruff)
+SYSTEM_PYTHON ?= python3
+PYTHON ?= .venv/bin/python
+PYTEST ?= .venv/bin/pytest
+RUFF ?= .venv/bin/ruff
 
-install:
-	$(PYTHON) -c "import codex_fleet" || $(PYTHON) -m pip install -e '.[dev]'
+.venv/bin/python:
+	$(SYSTEM_PYTHON) -m venv .venv
 
-lint:
+.venv/.installed: pyproject.toml .venv/bin/python
+	$(PYTHON) -m pip install -e '.[dev]'
+	touch .venv/.installed
+
+install: .venv/.installed
+
+lint: install
 	$(RUFF) check .
 
-test:
+test: install
 	$(PYTEST)
 
-doctor:
+doctor: install
 	$(PYTHON) -m codex_fleet doctor --repo .
 
-budget:
+budget: install
 	$(PYTHON) -m codex_fleet budget --repo .
 
-bootstrap:
+bootstrap: install
 	$(PYTHON) -m codex_fleet bootstrap --repo .
 
-smoke:
+smoke: install
 	$(PYTEST) tests/test_daemon.py tests/test_orchestrator.py
 
 up: install
@@ -31,28 +38,28 @@ up: install
 demo: install
 	PYTHONUNBUFFERED=1 $(PYTHON) -m codex_fleet up --repo . --fake --verbose
 
-down:
+down: install
 	$(PYTHON) -m codex_fleet down --repo .
 
-plane-up:
+plane-up: install
 	$(PYTHON) -m codex_fleet plane-up --repo .
 
-plane-status:
+plane-status: install
 	$(PYTHON) -m codex_fleet plane-status --repo .
 
-plane-bootstrap:
+plane-bootstrap: install
 	$(PYTHON) -m codex_fleet plane-bootstrap --repo .
 
-plane-source:
+plane-source: install
 	$(PYTHON) -m codex_fleet plane-source --repo .
 
-plane-verify:
+plane-verify: install
 	$(PYTHON) -m codex_fleet plane-verify --repo .
 
-plane-fork-preview:
+plane-fork-preview: install
 	$(PYTHON) -m codex_fleet plane-fork-preview --repo .
 
-plane-fork-prepare:
+plane-fork-prepare: install
 	$(PYTHON) -m codex_fleet plane-fork-preview --repo . --prepare-only
 
 plane-fork-clone:

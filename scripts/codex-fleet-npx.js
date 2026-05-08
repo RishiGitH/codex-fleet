@@ -18,6 +18,7 @@ function run(command, args, options = {}) {
     cwd: root,
     stdio: 'inherit',
     shell: false,
+    env: pythonEnv(),
     ...options,
   });
   if (result.error) {
@@ -34,8 +35,15 @@ function canImportCodexFleet() {
     cwd: root,
     stdio: 'ignore',
     shell: false,
+    env: pythonEnv(),
   });
   return !result.error && result.status === 0;
+}
+
+function pythonEnv() {
+  const env = { ...process.env };
+  delete env.PYTHONPATH;
+  return env;
 }
 
 function findSystemPython() {

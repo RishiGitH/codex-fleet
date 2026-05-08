@@ -8,8 +8,10 @@ from codex_fleet.plane import PlaneClient
 
 REQUIRED_STATES: tuple[str, ...] = (
     "Backlog",
+    "Planning",
     "Ready",
     "Running",
+    "Needs Input",
     "Human Review",
     "Rework",
     "Done",
@@ -19,8 +21,10 @@ REQUIRED_STATES: tuple[str, ...] = (
 
 STATE_GROUPS: dict[str, str] = {
     "Backlog": "backlog",
+    "Planning": "started",
     "Ready": "unstarted",
     "Running": "started",
+    "Needs Input": "started",
     "Human Review": "started",
     "Rework": "started",
     "Done": "completed",
@@ -30,8 +34,10 @@ STATE_GROUPS: dict[str, str] = {
 
 STATE_COLORS: dict[str, str] = {
     "Backlog": "#6B7280",
+    "Planning": "#14B8A6",
     "Ready": "#3B82F6",
     "Running": "#F59E0B",
+    "Needs Input": "#EC4899",
     "Human Review": "#8B5CF6",
     "Rework": "#EF4444",
     "Done": "#10B981",
@@ -43,6 +49,10 @@ REQUIRED_LABELS: dict[str, str] = {
     "human-requested": "#3B82F6",
     "agent-proposed": "#F59E0B",
     "agent-followup": "#8B5CF6",
+    "agent-lead": "#14B8A6",
+    "agent-worker": "#3B82F6",
+    "agent-reviewer": "#8B5CF6",
+    "needs-input": "#EC4899",
 }
 
 

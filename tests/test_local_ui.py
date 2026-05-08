@@ -49,7 +49,7 @@ def test_local_ui_can_route_failure_to_rework(tmp_path: Path) -> None:
     assert result["items"][0]["state"] == "Running"
 
     terminal = wait_for_state(board, "Rework")
-    assert terminal["items"][0]["run"]["status"] == "failed"
+    assert terminal["items"][0]["run"]["status"] == "rework"
     assert terminal["items"][0]["run"]["error"] == "run failed"
     assert "codex-fleet run failed" in "\n".join(terminal["items"][0]["comments"])
 

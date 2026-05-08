@@ -2,7 +2,7 @@ import subprocess
 from pathlib import Path
 
 from codex_fleet.config import FleetConfig, WorkspaceConfig
-from codex_fleet.models import ProposedTask, RunResult, RunStatus, WorkItem
+from codex_fleet.models import NeedsInput, ProposedTask, RunResult, RunStatus, WorkItem
 from codex_fleet.orchestrator import Orchestrator
 from codex_fleet.runner import FakeRunner, Runner
 from codex_fleet.store import RunStore
@@ -85,7 +85,7 @@ def test_orchestrator_records_events_and_artifacts(tmp_path: Path) -> None:
     assert artifacts[0].path.endswith(".codex-fleet-fake-run.txt")
 
 
-def test_orchestrator_auto_runs_agent_follow_up_tasks_by_default(tmp_path: Path) -> None:
+def test_orchestrator_creates_agent_follow_up_tasks_for_review_by_default(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     init_git_repo(repo)
@@ -105,19 +105,45 @@ def test_orchestrator_auto_runs_agent_follow_up_tasks_by_default(tmp_path: Path)
     assert result.run is not None
     created = [item for item in tracker.fetch_all_items() if item.identifier == "CF-2"]
     assert len(created) == 1
-    assert created[0].state == "Ready"
-    assert "agent-followup" in created[0].labels
+    assert created[0].state == "Backlog"
+    assert "agent-proposed" in created[0].labels
     assert "CF-2" in tracker.comments["1"][-1]
     assert "proposed this follow-up" in tracker.comments[created[0].id][-1]
     metadata = store.get_task_metadata(created[0].id)
     assert metadata is not None
-    assert metadata.source == "agent-followup"
+    assert metadata.source == "agent-proposed"
     assert metadata.depth == 1
     assert metadata.parent_item_id == "1"
     events = store.list_events(result.run.id)
     assert "proposed_task_created" in [event.kind for event in events]
     completed = [event for event in events if event.kind == "completed"]
     assert completed[-1].payload["proposed_task_count"] == 1
+
+
+def test_orchestrator_auto_runs_agent_follow_up_tasks_in_full_agent_mode(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+
+    item = WorkItem(id="1", identifier="CF-1", title="Smoke", description=None, state="Ready")
+    tracker = MemoryTracker([item], active_states=["Ready"])
+    config = FleetConfig(repo=repo, workspace=WorkspaceConfig(root=tmp_path / "workspaces")).resolved()
+    store = RunStore(tmp_path / "runs.sqlite3")
+
+    result = Orchestrator(
+        config=config,
+        tracker=tracker,
+        runner=ProposingRunner(),
+        store=store,
+        agent_task_mode="agent_task_planner",
+    ).run_once()
+
+    assert result.run is not None
+    created = [item for item in tracker.fetch_all_items() if item.identifier == "CF-2"]
+    assert len(created) == 1
+    assert created[0].state == "Ready"
+    assert "agent-followup" in created[0].labels
+    assert tracker.fetch_items_by_ids(["1"])[0].state == "Planning"
 
 
 def test_orchestrator_can_create_follow_up_tasks_for_review(tmp_path: Path) -> None:
@@ -264,12 +290,63 @@ def test_orchestrator_holds_claim_when_final_state_update_is_not_observed(tmp_pa
     assert "not dispatched again" in tracker.comments["1"][-1]
 
 
+def test_orchestrator_moves_blocked_runner_to_needs_input(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+
+    item = WorkItem(id="1", identifier="CF-1", title="Smoke", description=None, state="Ready")
+    tracker = MemoryTracker([item], active_states=["Ready"])
+    config = FleetConfig(repo=repo, workspace=WorkspaceConfig(root=tmp_path / "workspaces")).resolved()
+    store = RunStore(tmp_path / "runs.sqlite3")
+
+    result = Orchestrator(config=config, tracker=tracker, runner=NeedsInputRunner(), store=store).run_once()
+
+    assert result.dispatched is True
+    assert result.run is not None
+    assert tracker.fetch_items_by_ids(["1"])[0].state == "Needs Input"
+    assert "Which target should I use?" in tracker.comments["1"][-1]
+    assert "needs_input" in [event.kind for event in store.list_events(result.run.id)]
+
+
+def test_orchestrator_does_not_dispatch_dependency_blocked_child(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+
+    tracker = MemoryTracker(
+        [
+            WorkItem(id="child", identifier="CF-2", title="Child", description=None, state="Ready"),
+            WorkItem(id="dep", identifier="CF-1", title="Dependency", description=None, state="Running"),
+        ],
+        active_states=["Ready"],
+    )
+    config = FleetConfig(repo=repo, workspace=WorkspaceConfig(root=tmp_path / "workspaces")).resolved()
+    store = RunStore(tmp_path / "runs.sqlite3")
+    store.upsert_task_metadata(item_id="child", source="agent-followup", depth=1, depends_on=("dep",))
+
+    result = Orchestrator(config=config, tracker=tracker, runner=FakeRunner(), store=store).run_once()
+
+    assert result.dispatched is False
+    assert tracker.fetch_items_by_ids(["child"])[0].state == "Ready"
+
+
 class ProposingRunner(Runner):
     def run(self, item: WorkItem, workspace: Path) -> RunResult:
         return RunResult(
             success=True,
             summary="Implemented initial work.",
             proposed_tasks=(ProposedTask(title="Add regression coverage", description="Cover the follow-up path."),),
+        )
+
+
+class NeedsInputRunner(Runner):
+    def run(self, item: WorkItem, workspace: Path) -> RunResult:
+        return RunResult(
+            success=False,
+            summary="Blocked.",
+            needs_input=NeedsInput(question="Which target should I use?"),
+            error="Which target should I use?",
         )
 
 

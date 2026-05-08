@@ -26,11 +26,16 @@ from codex_fleet.local_work_items import (
     LocalWorkItemTracker,
     default_local_work_item_store_path,
 )
-from codex_fleet.models import WorkItem, WorkItemState
+from codex_fleet.models import RunStatus, WorkItem, WorkItemState
 from codex_fleet.orchestrator import Orchestrator
 from codex_fleet.plane import PlaneClient, PlaneSettings, plane_project_external_id
 from codex_fleet.plane_bootstrap import ensure_plane_labels, ensure_plane_states
-from codex_fleet.plane_local_bootstrap import PlaneLocalBootstrapError, create_local_plane_session
+from codex_fleet.plane_local_bootstrap import (
+    PlaneLocalBootstrapError,
+    bootstrap_local_plane,
+    create_local_plane_session,
+)
+from codex_fleet.plane_manager import DEFAULT_PLANE_URL
 from codex_fleet.project_registry import (
     DEFAULT_CODEX_SETTINGS,
     LocalProject,
@@ -44,7 +49,7 @@ from codex_fleet.store import RunStore, StoredArtifact, StoredEvent, StoredRun
 from codex_fleet.tracker import Tracker
 
 DEFAULT_LOCAL_API_HOST = "127.0.0.1"
-DEFAULT_LOCAL_API_PORT = 8790
+DEFAULT_LOCAL_API_PORT = 18790
 STARTER_PROJECT_TYPES = {"blank", "simple-web", "node-next", "python"}
 LOGIN_NONCE_TTL_SECONDS = 120
 SESSION_CODE_TTL_SECONDS = 120
@@ -230,6 +235,18 @@ class _Handler(BaseHTTPRequestHandler):
                 }
             )
             return
+        if path == "/api/folders/check":
+            if not self._authorized():
+                self._send_auth_missing()
+                return
+            self._send_json(
+                {
+                    "ok": True,
+                    "available": True,
+                    "picker": "native",
+                }
+            )
+            return
         if path == "/api/session/exchange":
             query = parse_qs(parsed.query)
             code = query.get("code", [""])[0]
@@ -239,7 +256,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(
                 {
                     "ok": True,
-                    "apiUrl": f"http://{self.server.server_address[0]}:{self.server.server_address[1]}",
+                    "apiUrl": _server_api_url(self.server),
                     "token": self.server.token,
                 }
             )
@@ -263,7 +280,7 @@ class _Handler(BaseHTTPRequestHandler):
             session_code = create_one_time_local_api_code(self.server.repo, kind="session", ttl_seconds=SESSION_CODE_TTL_SECONDS)
             redirect = _with_codex_fleet_fragment(
                 redirect,
-                api_url=f"http://{self.server.server_address[0]}:{self.server.server_address[1]}",
+                api_url=_server_api_url(self.server),
                 code=session_code,
             )
             self._send_plane_login_redirect(redirect, session.session_key)
@@ -284,6 +301,50 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_error(HTTPStatus.NOT_FOUND, "Project not found.")
                 return
             self._send_json({"settings": project.codex_settings, "project": _project_payload(project)})
+            return
+        if path.startswith("/api/projects/") and path.endswith("/agent-analytics"):
+            if not self._authorized():
+                self._send_auth_missing()
+                return
+            project_id = path.removeprefix("/api/projects/").removesuffix("/agent-analytics").strip("/")
+            project = _project_from_path_ref(self.server, project_id)
+            if project is None and project_id not in {"current", "local"}:
+                self._send_error(HTTPStatus.NOT_FOUND, "Project not found.")
+                return
+            repo = project.repo_path if project is not None else self.server.repo
+            store = RunStore(default_store_path(repo))
+            self._send_json({"analytics": _agent_analytics_payload(store)})
+            return
+        if path.startswith("/api/projects/") and path.endswith("/fleet-logs"):
+            if not self._authorized():
+                self._send_auth_missing()
+                return
+            project_id = path.removeprefix("/api/projects/").removesuffix("/fleet-logs").strip("/")
+            project = _project_from_path_ref(self.server, project_id)
+            if project is None and project_id not in {"current", "local"}:
+                self._send_json(
+                    {
+                        "fleet_logs": _unlinked_fleet_logs_payload(
+                            self.server.repo,
+                            plane_project_id=project_id,
+                        )
+                    }
+                )
+                return
+            repo = project.repo_path if project is not None else self.server.repo
+            self._send_json({"fleet_logs": _fleet_logs_payload(repo, project)})
+            return
+        if path.startswith("/api/projects/") and path.endswith("/control-plane-status"):
+            if not self._authorized():
+                self._send_auth_missing()
+                return
+            project_id = path.removeprefix("/api/projects/").removesuffix("/control-plane-status").strip("/")
+            project = _project_from_path_ref(self.server, project_id)
+            if project is None and project_id not in {"current", "local"}:
+                self._send_error(HTTPStatus.NOT_FOUND, "Project not found.")
+                return
+            repo = project.repo_path if project is not None else self.server.repo
+            self._send_json({"status": _control_plane_status_payload(self.server, repo)})
             return
         if path.startswith("/api/projects/"):
             if not self._authorized():
@@ -336,6 +397,40 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             self._send_json({"items": [_work_item_payload(item) for item in items]})
             return
+        if path.startswith("/api/runs/") and path.endswith("/events"):
+            if not self._authorized():
+                self._send_auth_missing()
+                return
+            try:
+                repo = _repo_from_query(self.server, parse_qs(parsed.query))
+            except ProjectRegistryError as exc:
+                self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            store = RunStore(default_store_path(repo))
+            run_id = path.removeprefix("/api/runs/").removesuffix("/events").strip("/")
+            if store.get_run(run_id) is None:
+                self._send_error(HTTPStatus.NOT_FOUND, "Run not found.")
+                return
+            self._send_json({"events": [_event_payload(event) for event in store.list_events(run_id)]})
+            return
+        if path.startswith("/api/runs/") and "/artifacts/" in path:
+            if not self._authorized():
+                self._send_auth_missing()
+                return
+            try:
+                repo = _repo_from_query(self.server, parse_qs(parsed.query))
+            except ProjectRegistryError as exc:
+                self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            parts = [part for part in path.strip("/").split("/") if part]
+            if len(parts) != 5 or parts[:2] != ["api", "runs"] or parts[3] != "artifacts":
+                self._send_error(HTTPStatus.NOT_FOUND, "Unknown artifact endpoint.")
+                return
+            try:
+                self._send_artifact(repo, run_id=parts[2], artifact_id=int(parts[4]))
+            except ValueError as exc:
+                self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+            return
         if path.startswith("/api/runs/"):
             if not self._authorized():
                 self._send_auth_missing()
@@ -366,6 +461,33 @@ class _Handler(BaseHTTPRequestHandler):
             item_id = path.removeprefix("/api/work-items/").removesuffix("/run-status").strip("/")
             run = store.latest_run_for_item(item_id)
             self._send_json({"run": _run_detail_payload(store, run) if run is not None else None})
+            return
+        if path.startswith("/api/work-items/") and path.endswith("/children"):
+            if not self._authorized():
+                self._send_auth_missing()
+                return
+            try:
+                repo = _repo_from_query(self.server, parse_qs(parsed.query))
+            except ProjectRegistryError as exc:
+                self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            store = RunStore(default_store_path(repo))
+            item_id = path.removeprefix("/api/work-items/").removesuffix("/children").strip("/")
+            self._send_json({"children": [_task_metadata_payload(child) for child in store.list_child_task_metadata(item_id)]})
+            return
+        if path.startswith("/api/work-items/") and path.endswith("/parent"):
+            if not self._authorized():
+                self._send_auth_missing()
+                return
+            try:
+                repo = _repo_from_query(self.server, parse_qs(parsed.query))
+            except ProjectRegistryError as exc:
+                self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            store = RunStore(default_store_path(repo))
+            item_id = path.removeprefix("/api/work-items/").removesuffix("/parent").strip("/")
+            metadata = store.get_task_metadata(item_id)
+            self._send_json({"parent": _task_metadata_payload(metadata) if metadata is not None else None})
             return
         self._send_error(HTTPStatus.NOT_FOUND, "Unknown endpoint.")
 
@@ -433,6 +555,7 @@ class _Handler(BaseHTTPRequestHandler):
             name = name_value if isinstance(name_value, str) and name_value.strip() else None
             apply_project_harness = _bool_payload(payload, "apply_harness", default=False)
             codex_settings = _codex_settings_payload(payload)
+            require_plane_mapping = _bool_payload(payload, "require_plane_mapping", default=False)
             if not _bool_payload(payload, "create_new", default=False):
                 git_root = discover_git_root(Path(path_value))
                 if git_root is None:
@@ -453,6 +576,10 @@ class _Handler(BaseHTTPRequestHandler):
             setup_log.append(f"Local project registered: {project.repo_path}")
             project, plane_mapping = _ensure_plane_project_mapping(self.server, project)
             self._log(f"Plane project mapping: status={plane_mapping.get('status')} project_id={plane_mapping.get('project_id')}")
+            if require_plane_mapping and plane_mapping.get("status") != "linked":
+                reason = str(plane_mapping.get("reason") or "Plane project mapping failed.")
+                self._send_error(HTTPStatus.BAD_REQUEST, reason, code="plane_mapping_failed")
+                return
             if plane_mapping.get("status") == "linked":
                 setup_log.append(f"Plane project linked: {plane_mapping.get('project_id')}")
             else:
@@ -564,6 +691,117 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             self._send_json(result, status=HTTPStatus.ACCEPTED)
             return
+        if path.startswith("/api/work-items/") and path.endswith("/answer-input"):
+            item_id = path.removeprefix("/api/work-items/").removesuffix("/answer-input").strip("/")
+            if not item_id:
+                self._send_error(HTTPStatus.BAD_REQUEST, "Missing work item id.")
+                return
+            payload = self._read_json()
+            answer = payload.get("answer")
+            if not isinstance(answer, str) or not answer.strip():
+                self._send_error(HTTPStatus.BAD_REQUEST, "Expected non-empty answer.")
+                return
+            try:
+                repo = _repo_from_payload(self.server, payload)
+                tracker = _build_local_api_tracker(load_config(repo))
+                tracker.create_comment(item_id, f"Human answer for codex-fleet:\n\n{answer.strip()}")
+                tracker.update_item_state(item_id, WorkItemState.READY.value)
+            except (ProjectRegistryError, ValueError) as exc:
+                self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            self._send_json({"ok": True, "state": WorkItemState.READY.value}, status=HTTPStatus.ACCEPTED)
+            return
+        if path.startswith("/api/work-items/") and path.endswith("/settings"):
+            item_id = path.removeprefix("/api/work-items/").removesuffix("/settings").strip("/")
+            payload = self._read_json()
+            try:
+                repo = _repo_from_payload(self.server, payload)
+                result = _update_work_item_settings(repo, item_id, payload)
+            except (ProjectRegistryError, ValueError) as exc:
+                self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            self._send_json(result, status=HTTPStatus.ACCEPTED)
+            return
+        if path.startswith("/api/work-items/") and path.endswith("/plan"):
+            item_id = path.removeprefix("/api/work-items/").removesuffix("/plan").strip("/")
+            payload = self._read_json()
+            try:
+                repo = _repo_from_payload(self.server, payload)
+                tracker = _build_local_api_tracker(load_config(repo))
+                items = tracker.fetch_items_by_ids([item_id])
+                if not items:
+                    raise ValueError(f"Work item not found: {item_id}")
+                tracker.update_item_state(item_id, WorkItemState.READY.value)
+                _update_work_item_settings(
+                    repo,
+                    item_id,
+                    {
+                        **payload,
+                        "automation_mode": "full_agent",
+                        "agent_task_mode": "agent_task_planner",
+                        "agent_role": "planner",
+                    },
+                )
+                result = _run_work_item(repo, item_id, fake=_bool_payload(payload, "fake", default=False), fake_succeed=True, settings=payload)
+            except (ProjectRegistryError, ValueError) as exc:
+                self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            self._send_json(result, status=HTTPStatus.ACCEPTED)
+            return
+        if path.startswith("/api/work-items/") and path.endswith("/retry"):
+            item_id = path.removeprefix("/api/work-items/").removesuffix("/retry").strip("/")
+            if not item_id:
+                self._send_error(HTTPStatus.BAD_REQUEST, "Missing work item id.")
+                return
+            payload = self._read_json()
+            try:
+                repo = _repo_from_payload(self.server, payload)
+                result = _retry_work_item(repo, item_id)
+            except (ProjectRegistryError, ValueError) as exc:
+                self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            self._send_json(result, status=HTTPStatus.ACCEPTED)
+            return
+        if path.startswith("/api/work-items/") and path.endswith("/cancel"):
+            item_id = path.removeprefix("/api/work-items/").removesuffix("/cancel").strip("/")
+            if not item_id:
+                self._send_error(HTTPStatus.BAD_REQUEST, "Missing work item id.")
+                return
+            payload = self._read_json()
+            try:
+                repo = _repo_from_payload(self.server, payload)
+                result = _cancel_work_item(repo, item_id)
+            except (ProjectRegistryError, ValueError) as exc:
+                self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            self._send_json(result, status=HTTPStatus.ACCEPTED)
+            return
+        if path.startswith("/api/runs/") and path.endswith("/retry"):
+            run_id = path.removeprefix("/api/runs/").removesuffix("/retry").strip("/")
+            payload = self._read_json()
+            try:
+                repo = _repo_from_payload(self.server, payload)
+                run = RunStore(default_store_path(repo)).get_run(run_id)
+                if run is None:
+                    self._send_error(HTTPStatus.NOT_FOUND, "Run not found.")
+                    return
+                result = _retry_work_item(repo, run.item_id)
+            except (ProjectRegistryError, ValueError) as exc:
+                self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            self._send_json(result, status=HTTPStatus.ACCEPTED)
+            return
+        if path.startswith("/api/runs/") and path.endswith("/cancel"):
+            run_id = path.removeprefix("/api/runs/").removesuffix("/cancel").strip("/")
+            payload = self._read_json()
+            try:
+                repo = _repo_from_payload(self.server, payload)
+                result = _cancel_run(repo, run_id)
+            except (ProjectRegistryError, ValueError) as exc:
+                self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            self._send_json(result, status=HTTPStatus.ACCEPTED)
+            return
         self._send_error(HTTPStatus.NOT_FOUND, "Unknown endpoint.")
 
     def log_message(self, format: str, *args: object) -> None:
@@ -648,6 +886,37 @@ class _Handler(BaseHTTPRequestHandler):
             payload["code"] = code
         self._send_json(payload, status=status)
 
+    def _send_artifact(self, repo: Path, *, run_id: str, artifact_id: int) -> None:
+        store = RunStore(default_store_path(repo))
+        run = store.get_run(run_id)
+        if run is None:
+            self._send_error(HTTPStatus.NOT_FOUND, "Run not found.")
+            return
+        artifact = next((item for item in store.list_artifacts(run_id) if item.id == artifact_id), None)
+        if artifact is None:
+            self._send_error(HTTPStatus.NOT_FOUND, "Artifact not found.")
+            return
+        artifact_path = Path(artifact.path).expanduser().resolve()
+        allowed_roots = [repo.expanduser().resolve()]
+        if run.worktree_path:
+            allowed_roots.append(Path(run.worktree_path).expanduser().resolve())
+        if not any(_is_relative_to(artifact_path, root) for root in allowed_roots):
+            self._send_error(HTTPStatus.FORBIDDEN, "Artifact path is outside the project/worktree.")
+            return
+        if not artifact_path.exists() or not artifact_path.is_file():
+            self._send_error(HTTPStatus.NOT_FOUND, "Artifact file not found.")
+            return
+        body = artifact_path.read_bytes()
+        self.send_response(HTTPStatus.OK.value)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-Codex-Fleet-Artifact-Kind", artifact.kind)
+        self.send_header("X-Codex-Fleet-Artifact-Redaction", artifact.redaction)
+        if artifact.sha256:
+            self.send_header("X-Codex-Fleet-Artifact-Sha256", artifact.sha256)
+        self.end_headers()
+        self.wfile.write(body)
+
     def _send_plane_login_redirect(self, redirect: str, session_key: str) -> None:
         self.send_response(HTTPStatus.FOUND.value)
         self.send_header("Location", redirect)
@@ -681,6 +950,12 @@ def _safe_loopback_redirect(url: str, *, expected_origin: str = "") -> bool:
     )
 
 
+def _server_api_url(server: LocalApiServer) -> str:
+    host, port = server.server_address[:2]
+    host_text = host.decode("utf-8") if isinstance(host, bytes) else str(host)
+    return f"http://{host_text}:{port}"
+
+
 def _safe_loopback_origin(origin: str) -> bool:
     if not origin:
         return False
@@ -690,7 +965,7 @@ def _safe_loopback_origin(origin: str) -> bool:
 
 def _ensure_plane_project_mapping(server: LocalApiServer, project: LocalProject) -> tuple[LocalProject, dict[str, Any]]:
     try:
-        control_config = load_config(server.repo)
+        control_config = _load_or_bootstrap_plane_config(server.repo)
     except Exception as exc:
         return project, {"status": "skipped", "reason": f"control config unavailable: {exc}"}
     if control_config.tracker.kind != "plane":
@@ -749,6 +1024,21 @@ def _ensure_plane_project_mapping(server: LocalApiServer, project: LocalProject)
         }
     except Exception as exc:
         return project, {"status": "error", "reason": str(exc)}
+
+
+def _load_or_bootstrap_plane_config(repo: Path) -> Any:
+    config = load_config(repo)
+    if config.tracker.kind == "plane":
+        return config
+    result = bootstrap_local_plane(repo)
+    write_plane_tracker_config(
+        repo,
+        base_url=DEFAULT_PLANE_URL,
+        workspace_slug=result.workspace_slug,
+        project_id=result.project_id,
+        api_key_value=result.api_key,
+    )
+    return load_config(repo)
 
 
 def _create_starter_project(payload: dict[str, Any]) -> Path:
@@ -870,6 +1160,13 @@ def _run_payload(run: StoredRun) -> dict[str, Any]:
         "status": run.status,
         "branch_name": run.branch_name,
         "worktree_path": run.worktree_path,
+        "runner_name": run.runner_name,
+        "agent_role": run.agent_role,
+        "agent_name": run.agent_name,
+        "agent_avatar": run.agent_avatar,
+        "model": run.model,
+        "settings": run.settings,
+        "token_usage": run.token_usage,
         "error": run.error,
     }
 
@@ -879,6 +1176,109 @@ def _run_detail_payload(store: RunStore, run: StoredRun) -> dict[str, Any]:
     payload["events"] = [_event_payload(event) for event in store.list_events(run.id)]
     payload["artifacts"] = [_artifact_payload(artifact) for artifact in store.list_artifacts(run.id)]
     return payload
+
+
+_ACTIVE_RUN_STATUSES = {
+    RunStatus.QUEUED.value,
+    RunStatus.CLAIM_ACQUIRED.value,
+    RunStatus.PREPARING_WORKSPACE.value,
+    RunStatus.WORKSPACE_READY.value,
+    RunStatus.RUNNER_STARTED.value,
+    RunStatus.RUNNER_STREAMING.value,
+    RunStatus.RUNNING_CODEX.value,
+    RunStatus.CANCEL_REQUESTED.value,
+}
+
+
+def _agent_analytics_payload(store: RunStore) -> dict[str, Any]:
+    runs = store.list_runs(limit=500)
+    by_role: dict[str, dict[str, Any]] = {}
+    total_tokens = 0
+    for run in runs:
+        role = run.agent_role or str(run.settings.get("agent_role") or "unknown")
+        bucket = by_role.setdefault(
+            role,
+            {
+                "role": role,
+                "runs": 0,
+                "success": 0,
+                "failed": 0,
+                "active": 0,
+                "cancelled": 0,
+                "total_tokens": 0,
+            },
+        )
+        bucket["runs"] += 1
+        if run.status in {RunStatus.HUMAN_REVIEW.value, RunStatus.DONE.value}:
+            bucket["success"] += 1
+        elif run.status == RunStatus.CANCELLED.value:
+            bucket["cancelled"] += 1
+        elif run.status in _ACTIVE_RUN_STATUSES:
+            bucket["active"] += 1
+        elif run.status in {
+            RunStatus.FAILED.value,
+            RunStatus.REWORK.value,
+            RunStatus.BLOCKED.value,
+            RunStatus.NEEDS_INPUT.value,
+            RunStatus.STALLED.value,
+        }:
+            bucket["failed"] += 1
+        tokens = run.token_usage.get("total_tokens")
+        if isinstance(tokens, int):
+            bucket["total_tokens"] += tokens
+            total_tokens += tokens
+    return {
+        "runs_total": len(runs),
+        "active_runs": sum(1 for run in runs if run.status in _ACTIVE_RUN_STATUSES),
+        "total_tokens": total_tokens,
+        "by_role": sorted(by_role.values(), key=lambda item: str(item["role"])),
+        "recent_events": [_event_payload(event) for event in store.list_recent_events(limit=25)],
+    }
+
+
+def _fleet_logs_payload(repo: Path, project: LocalProject | None) -> dict[str, Any]:
+    store = RunStore(default_store_path(repo))
+    runs = store.list_runs(limit=200)
+    task_metadata = [metadata for parent_id in store.list_parent_item_ids_with_children() for metadata in store.list_child_task_metadata(parent_id)]
+    latest_by_item = {run.item_id: run for run in runs}
+    return {
+        "project": _project_payload(project) if project is not None else None,
+        "repo": str(repo.expanduser().resolve()),
+        "analytics": _agent_analytics_payload(store),
+        "runs": [_run_detail_payload(store, run) for run in runs],
+        "recent_events": [_event_payload(event) for event in store.list_recent_events(limit=100)],
+        "tasks": [
+            {
+                **_task_metadata_payload(metadata),
+                "latest_run": _run_payload(latest_by_item[metadata.item_id]) if metadata.item_id in latest_by_item else None,
+            }
+            for metadata in task_metadata
+        ],
+    }
+
+
+def _unlinked_fleet_logs_payload(_repo: Path, *, plane_project_id: str) -> dict[str, Any]:
+    analytics = {
+        "runs_total": 0,
+        "active_runs": 0,
+        "total_tokens": 0,
+        "by_role": [],
+        "recent_events": [],
+    }
+    return {
+        "linked": False,
+        "message": (
+            "This Plane project is not linked to a local codex-fleet repo yet. "
+            "Create or link the project from the codex-fleet Add Project flow so runs, agents, and logs can be tracked here."
+        ),
+        "plane_project_id": plane_project_id,
+        "project": None,
+        "repo": "",
+        "analytics": analytics,
+        "runs": [],
+        "recent_events": [],
+        "tasks": [],
+    }
 
 
 def _event_payload(event: StoredEvent) -> dict[str, Any]:
@@ -896,7 +1296,45 @@ def _artifact_payload(artifact: StoredArtifact) -> dict[str, Any]:
         "id": artifact.id,
         "path": artifact.path,
         "kind": artifact.kind,
+        "size_bytes": artifact.size_bytes,
+        "sha256": artifact.sha256,
+        "redaction": artifact.redaction,
         "created_at": artifact.created_at,
+    }
+
+
+def _token_usage_payload(token_usage: object) -> dict[str, int]:
+    if token_usage is None:
+        return {}
+    return {
+        key: value
+        for key, value in {
+            "input_tokens": getattr(token_usage, "input_tokens", None),
+            "output_tokens": getattr(token_usage, "output_tokens", None),
+            "total_tokens": getattr(token_usage, "total_tokens", None),
+        }.items()
+        if isinstance(value, int)
+    }
+
+
+def _task_metadata_payload(metadata: Any) -> dict[str, Any]:
+    return {
+        "item_id": metadata.item_id,
+        "source": metadata.source,
+        "depth": metadata.depth,
+        "parent_item_id": metadata.parent_item_id,
+        "parent_identifier": metadata.parent_identifier,
+        "parent_run_id": metadata.parent_run_id,
+        "created_by_run_id": metadata.created_by_run_id,
+        "root_item_id": metadata.root_item_id,
+        "role": metadata.role,
+        "depends_on": list(metadata.depends_on),
+        "generation": metadata.generation,
+        "approval_mode": metadata.approval_mode,
+        "terminal_outcome": metadata.terminal_outcome,
+        "settings": metadata.settings,
+        "created_at": metadata.created_at,
+        "updated_at": metadata.updated_at,
     }
 
 
@@ -940,6 +1378,45 @@ def _harness_plan_payload(plan: HarnessPlan, *, status: str) -> dict[str, Any]:
             for file in plan.files
         ],
         "missing": [str(file.path) for file in plan.missing],
+    }
+
+
+def _control_plane_status_payload(server: LocalApiServer, repo: Path) -> dict[str, Any]:
+    config = load_config(repo)
+    store = RunStore(default_store_path(config.repo))
+    plane_ready = False
+    plane_detail = "tracker is not Plane"
+    if config.tracker.kind == "plane":
+        try:
+            client = build_plane_client(config)
+            client.list_states()
+            plane_ready = True
+            plane_detail = "connected"
+        except Exception as exc:  # noqa: BLE001 - status endpoint reports readiness, not failure.
+            plane_detail = str(exc)
+    runner_ready = True
+    runner_detail: str = config.codex.runner
+    if config.codex.runner == "cli":
+        try:
+            result = subprocess.run(
+                config.codex.command.split()[:2] + ["--help"],
+                cwd=config.repo,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
+            runner_ready = result.returncode == 0
+            runner_detail = result.stderr.strip() or (result.stdout.splitlines()[0] if result.stdout else config.codex.command)
+        except Exception as exc:  # noqa: BLE001
+            runner_ready = False
+            runner_detail = str(exc)
+    return {
+        "api": {"ready": True, "repo": str(server.repo), "project_repo": str(config.repo)},
+        "daemon": {"ready": True, "store": str(store.path)},
+        "plane": {"ready": plane_ready, "detail": plane_detail},
+        "runner": {"ready": runner_ready, "detail": runner_detail},
+        "auth": {"ready": bool(server.token), "mode": "local-token"},
     }
 
 
@@ -1110,8 +1587,9 @@ def _run_next_work_item(
         ),
         agent_task_settings_resolver=lambda item: (
             str(settings_value(settings_for_item(item), "agent_task_mode")),
-            int(settings_value(settings_for_item(item), "max_task_depth")),
+            _int_setting(settings_for_item(item), "max_task_depth"),
         ),
+        max_child_tasks_per_run=_int_setting(settings, "max_child_tasks_per_run"),
     ).run_once()
     payload: dict[str, Any] = {
         "dispatched": result.dispatched,
@@ -1128,6 +1606,13 @@ def _run_next_work_item(
                 status=result.run.status.value,
                 branch_name=result.run.branch_name,
                 worktree_path=str(result.run.worktree_path) if result.run.worktree_path else None,
+                runner_name=result.run.runner_name,
+                agent_role=result.run.agent_role,
+                agent_name=result.run.agent_name,
+                agent_avatar=result.run.agent_avatar,
+                model=result.run.model,
+                settings=result.run.settings,
+                token_usage=_token_usage_payload(result.run.token_usage),
                 error=result.run.error,
             )
         )
@@ -1164,7 +1649,8 @@ def _run_work_item(
         runner=build_runner(config, fake=fake, fake_succeed=fake_succeed),
         store=store,
         agent_task_mode=str(_settings_value(merged_settings, "agent_task_mode")),
-        max_task_depth=int(_settings_value(merged_settings, "max_task_depth")),
+        max_task_depth=_int_setting(merged_settings, "max_task_depth"),
+        max_child_tasks_per_run=_int_setting(merged_settings, "max_child_tasks_per_run"),
     ).run_once()
     payload: dict[str, Any] = {
         "dispatched": result.dispatched,
@@ -1181,10 +1667,84 @@ def _run_work_item(
                 status=result.run.status.value,
                 branch_name=result.run.branch_name,
                 worktree_path=str(result.run.worktree_path) if result.run.worktree_path else None,
+                runner_name=result.run.runner_name,
+                agent_role=result.run.agent_role,
+                agent_name=result.run.agent_name,
+                agent_avatar=result.run.agent_avatar,
+                model=result.run.model,
+                settings=result.run.settings,
+                token_usage=_token_usage_payload(result.run.token_usage),
                 error=result.run.error,
             ),
         )
     return payload
+
+
+def _retry_work_item(repo: Path, item_id: str) -> dict[str, Any]:
+    config = load_config(repo)
+    tracker = _build_local_api_tracker(config)
+    items = tracker.fetch_items_by_ids([item_id])
+    if not items:
+        raise ValueError(f"Work item not found: {item_id}")
+    store = RunStore(default_store_path(config.repo))
+    latest = store.latest_run_for_item(item_id)
+    if latest is not None:
+        store.finish_claim(item_id, latest.id, "retry_requested")
+        if latest.status in _ACTIVE_RUN_STATUSES:
+            store.update_run_status(latest.id, RunStatus.CANCEL_REQUESTED.value, error="Retry requested from local UI.")
+        store.add_event(latest.id, "retry_requested", {"state": WorkItemState.READY.value})
+    tracker.create_comment(item_id, "codex-fleet retry requested. This item was moved back to Ready.")
+    tracker.update_item_state(item_id, WorkItemState.READY.value)
+    return {
+        "ok": True,
+        "item": _work_item_payload(tracker.fetch_items_by_ids([item_id])[0]),
+        "previous_run": _run_payload(latest) if latest is not None else None,
+        "state": WorkItemState.READY.value,
+    }
+
+
+def _cancel_work_item(repo: Path, item_id: str) -> dict[str, Any]:
+    config = load_config(repo)
+    tracker = _build_local_api_tracker(config)
+    items = tracker.fetch_items_by_ids([item_id])
+    if not items:
+        raise ValueError(f"Work item not found: {item_id}")
+    store = RunStore(default_store_path(config.repo))
+    latest = store.latest_run_for_item(item_id)
+    if latest is not None:
+        store.update_run_status(latest.id, RunStatus.CANCEL_REQUESTED.value, error="Cancelled by local API.")
+        store.finish_claim(item_id, latest.id, "cancel_requested")
+        store.add_event(latest.id, "cancel_requested", {"state": WorkItemState.CANCELLED.value})
+        store.update_run_status(latest.id, RunStatus.CANCELLED.value, error="Cancelled by local API.")
+        store.add_event(latest.id, "cancelled", {"state": WorkItemState.CANCELLED.value})
+    tracker.create_comment(item_id, "codex-fleet cancelled this item from the local UI.")
+    tracker.update_item_state(item_id, WorkItemState.CANCELLED.value)
+    latest = store.latest_run_for_item(item_id)
+    return {
+        "ok": True,
+        "item": _work_item_payload(tracker.fetch_items_by_ids([item_id])[0]),
+        "run": _run_detail_payload(store, latest) if latest is not None else None,
+        "state": WorkItemState.CANCELLED.value,
+    }
+
+
+def _cancel_run(repo: Path, run_id: str) -> dict[str, Any]:
+    config = load_config(repo)
+    store = RunStore(default_store_path(config.repo))
+    run = store.get_run(run_id)
+    if run is None:
+        raise ValueError(f"Run not found: {run_id}")
+    store.update_run_status(run.id, RunStatus.CANCEL_REQUESTED.value, error="Cancelled by local API.")
+    store.finish_claim(run.item_id, run.id, "cancel_requested")
+    store.add_event(run.id, "cancel_requested", {"state": WorkItemState.CANCELLED.value})
+    store.update_run_status(run.id, RunStatus.CANCELLED.value, error="Cancelled by local API.")
+    store.add_event(run.id, "cancelled", {"state": WorkItemState.CANCELLED.value})
+    tracker = _build_local_api_tracker(config)
+    tracker.create_comment(run.item_id, f"codex-fleet run `{run.id}` was cancelled from the local UI.")
+    tracker.update_item_state(run.item_id, WorkItemState.CANCELLED.value)
+    cancelled = store.get_run(run.id)
+    assert cancelled is not None
+    return {"ok": True, "run": _run_detail_payload(store, cancelled), "state": WorkItemState.CANCELLED.value}
 
 
 def _create_work_item(repo: Path, payload: dict[str, Any], *, settings: dict[str, Any] | None = None) -> WorkItem:
@@ -1198,14 +1758,15 @@ def _create_work_item(repo: Path, payload: dict[str, Any], *, settings: dict[str
         created = _create_local_work_item(config.repo, title=title, description=description)
     else:
         tracker = build_tracker(config)
-        created = tracker.create_work_item(
+        maybe_created = tracker.create_work_item(
             title=title.strip(),
             description=description,
             state=WorkItemState.READY.value,
             labels=("human-requested",),
         )
-        if created is None:
+        if maybe_created is None:
             raise ValueError("codex-fleet could not create the work item.")
+        created = maybe_created
     RunStore(default_store_path(config.repo)).upsert_task_metadata(
         item_id=created.id,
         source="human-requested",
@@ -1233,14 +1794,15 @@ def _create_goal_work_item(
         )
     else:
         tracker = build_tracker(config)
-        created = tracker.create_work_item(
+        maybe_created = tracker.create_work_item(
             title=title,
             description=description,
             state=state,
             labels=("human-requested",),
         )
-        if created is None:
+        if maybe_created is None:
             raise ValueError("codex-fleet could not create the initial goal work item.")
+        created = maybe_created
     RunStore(default_store_path(config.repo)).upsert_task_metadata(
         item_id=created.id,
         source="human-requested",
@@ -1291,6 +1853,11 @@ def _settings_value(settings: dict[str, Any] | None, key: str) -> object:
     return normalize_codex_settings(settings).get(key, DEFAULT_CODEX_SETTINGS[key])
 
 
+def _int_setting(settings: dict[str, Any] | None, key: str) -> int:
+    value = _settings_value(settings, key)
+    return value if isinstance(value, int) else int(DEFAULT_CODEX_SETTINGS[key])
+
+
 def _goal_title_and_description(goal: str) -> tuple[str, str]:
     clean = " ".join(goal.strip().split())
     first_sentence = clean.split(".", 1)[0].strip()
@@ -1324,6 +1891,14 @@ def _codex_settings_from_work_item(item: WorkItem) -> dict[str, Any]:
     settings = {key: value for key, value in parsed.items() if key != "skills"}
     if settings.get("agent_task_mode") == "project-default":
         settings.pop("agent_task_mode", None)
+    if settings.get("automation_mode") == "project-default":
+        settings.pop("automation_mode", None)
+    if "agent_task_mode" in settings and "automation_mode" not in settings:
+        settings["automation_mode"] = {
+            "manual": "manual",
+            "review_and_approve": "assisted",
+            "agent_task_planner": "full_agent",
+        }.get(str(settings["agent_task_mode"]), "assisted")
     return settings
 
 
@@ -1339,11 +1914,22 @@ def _codex_settings_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "approval_policy",
         "sandbox_mode",
         "agent_task_mode",
+        "automation_mode",
+        "agent_role",
+        "skill_policy",
     ):
         value = payload.get(key)
         if isinstance(value, str):
             settings[key] = value
-    for key in ("max_parallel_agents", "max_task_depth", "job_timeout_seconds"):
+    for key in (
+        "max_parallel_agents",
+        "max_task_depth",
+        "max_child_tasks_per_run",
+        "max_total_agent_created_tasks_per_parent",
+        "job_timeout_seconds",
+        "max_prompt_protocol_tokens",
+        "max_plane_comment_chars",
+    ):
         value = payload.get(key)
         if isinstance(value, int):
             settings[key] = value
@@ -1351,6 +1937,51 @@ def _codex_settings_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if isinstance(subagents, dict):
         settings["subagents"] = subagents
     return settings
+
+
+def _update_work_item_settings(repo: Path, item_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    config = load_config(repo)
+    tracker = _build_local_api_tracker(config)
+    items = tracker.fetch_items_by_ids([item_id])
+    if not items:
+        raise ValueError(f"Work item not found: {item_id}")
+    store = RunStore(default_store_path(config.repo))
+    existing = store.get_task_metadata(item_id)
+    settings = normalize_codex_settings({**(existing.settings if existing is not None else {}), **_codex_settings_payload(payload)})
+    role = str(settings.get("agent_role") or payload.get("role") or (existing.role if existing is not None else "worker"))
+    depends_on = payload.get("depends_on")
+    dependency_ids = tuple(str(item) for item in depends_on if isinstance(item, str)) if isinstance(depends_on, list) else (
+        existing.depends_on if existing is not None else ()
+    )
+    store.upsert_task_metadata(
+        item_id=item_id,
+        source=existing.source if existing is not None else "human-settings",
+        depth=existing.depth if existing is not None else 0,
+        parent_item_id=existing.parent_item_id if existing is not None else None,
+        parent_identifier=existing.parent_identifier if existing is not None else None,
+        parent_run_id=existing.parent_run_id if existing is not None else None,
+        created_by_run_id=existing.created_by_run_id if existing is not None else None,
+        root_item_id=existing.root_item_id if existing is not None else item_id,
+        role=role,
+        depends_on=dependency_ids,
+        generation=existing.generation if existing is not None else 0,
+        approval_mode=str(settings.get("automation_mode") or "assisted"),
+        terminal_outcome=existing.terminal_outcome if existing is not None else None,
+        settings=settings,
+    )
+    metadata = store.get_task_metadata(item_id)
+    if metadata is None:
+        raise ValueError("Could not persist work item settings.")
+    tracker.create_comment(item_id, "codex-fleet task settings were updated.")
+    return {"ok": True, "settings": settings, "metadata": _task_metadata_payload(metadata)}
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
 
 
 def _create_local_work_item(repo: Path, *, title: str, description: str | None) -> WorkItem:

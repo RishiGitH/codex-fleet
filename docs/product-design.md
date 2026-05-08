@@ -148,8 +148,10 @@ If a dependency is missing, fail with a precise next action. Do not fail with a 
 The required Plane states are:
 
 - Backlog
+- Planning
 - Ready
 - Running
+- Needs Input
 - Human Review
 - Rework
 - Done
@@ -157,6 +159,12 @@ The required Plane states are:
 - Cancelled
 
 Only Ready items are eligible for automatic dispatch.
+
+Automation modes:
+
+- `manual`: follow-up tasks are reported, not created.
+- `assisted`: follow-up tasks are created in Backlog for review.
+- `full_agent`: follow-up child tasks are created in Ready within configured depth/count limits.
 
 ## Run State Machine
 
@@ -172,13 +180,15 @@ Ready
   -> runner_event
   -> runner_completed
   -> collecting_evidence
-  -> Human Review | Rework | Blocked | Cancelled
+  -> Planning | Needs Input | Human Review | Rework | Blocked | Cancelled
 ```
 
 Tracker transitions:
 
 - Ready -> Running before the runner starts.
 - Running -> Human Review on success.
+- Running -> Planning when a full-agent lead creates Ready child tasks.
+- Running -> Needs Input when Codex asks a blocking question.
 - Running -> Rework on runner failure.
 - Running -> Blocked when local setup or credentials are missing.
 - Running -> Cancelled only through explicit operator cancellation.

@@ -14,21 +14,21 @@ from codex_fleet.lifecycle import (
 
 
 def test_runtime_record_round_trip(tmp_path: Path) -> None:
-    path = write_runtime_record(tmp_path, kind="plane-fork-preview", url="http://127.0.0.1:3000", api_url=None)
+    path = write_runtime_record(tmp_path, kind="plane-fork-preview", url="http://127.0.0.1:17300", api_url=None)
 
     record = read_runtime_record(tmp_path)
 
     assert path == runtime_record_path(tmp_path)
     assert record is not None
     assert record.kind == "plane-fork-preview"
-    assert record.url == "http://127.0.0.1:3000"
+    assert record.url == "http://127.0.0.1:17300"
 
     remove_runtime_record(tmp_path)
     assert read_runtime_record(tmp_path) is None
 
 
 def test_stop_runtime_process_removes_stale_record(tmp_path: Path, monkeypatch) -> None:
-    path = write_runtime_record(tmp_path, kind="plane-fork-preview", url="http://127.0.0.1:3000")
+    path = write_runtime_record(tmp_path, kind="plane-fork-preview", url="http://127.0.0.1:17300")
     payload = json.loads(path.read_text())
     payload["pid"] = 999999
     path.write_text(json.dumps(payload))

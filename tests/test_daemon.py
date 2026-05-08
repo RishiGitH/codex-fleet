@@ -125,6 +125,124 @@ def test_daemon_reports_stale_running_claim_to_rework(tmp_path: Path) -> None:
     assert "released a stale run claim" in stale_run.error
 
 
+def test_daemon_moves_planning_parent_to_review_when_all_children_are_terminal(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    config = FleetConfig(repo=repo, workspace=WorkspaceConfig(root=tmp_path / "workspaces")).resolved()
+    store = RunStore(tmp_path / "runs.sqlite3")
+    store.upsert_run(run_id="parent-run", item_id="1", identifier="CF-1", status="human_review")
+    store.upsert_task_metadata(
+        item_id="2",
+        source="agent-followup",
+        depth=1,
+        parent_item_id="1",
+        parent_identifier="CF-1",
+        parent_run_id="parent-run",
+    )
+    store.upsert_task_metadata(
+        item_id="3",
+        source="agent-followup",
+        depth=1,
+        parent_item_id="1",
+        parent_identifier="CF-1",
+        parent_run_id="parent-run",
+    )
+    tracker = MemoryTracker(
+        [
+            WorkItem(id="1", identifier="CF-1", title="Parent", description=None, state="Planning"),
+            WorkItem(id="2", identifier="CF-2", title="Child one", description=None, state="Done"),
+            WorkItem(id="3", identifier="CF-3", title="Child two", description=None, state="Human Review"),
+        ]
+    )
+    daemon = FleetDaemon(config, fake_runner=True)
+    daemon.store = store
+    daemon.tracker = tracker
+
+    completed = daemon.reconcile_completed_parents()
+
+    assert completed == 1
+    assert tracker.fetch_items_by_ids(["1"])[0].state == "Human Review"
+    assert "all 2 child tasks reached Human Review or Done" in tracker.comments["1"][-1]
+    assert [event.kind for event in store.list_events("parent-run")] == ["parent_children_completed"]
+
+
+def test_daemon_keeps_planning_parent_blocked_when_child_needs_attention(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    config = FleetConfig(repo=repo, workspace=WorkspaceConfig(root=tmp_path / "workspaces")).resolved()
+    store = RunStore(tmp_path / "runs.sqlite3")
+    store.upsert_run(run_id="parent-run", item_id="1", identifier="CF-1", status="planning")
+    store.upsert_task_metadata(
+        item_id="2",
+        source="agent-followup",
+        depth=1,
+        parent_item_id="1",
+        parent_identifier="CF-1",
+        parent_run_id="parent-run",
+    )
+    tracker = MemoryTracker(
+        [
+            WorkItem(id="1", identifier="CF-1", title="Parent", description=None, state="Planning"),
+            WorkItem(id="2", identifier="CF-2", title="Child", description=None, state="Rework"),
+        ]
+    )
+    daemon = FleetDaemon(config, fake_runner=True)
+    daemon.store = store
+    daemon.tracker = tracker
+
+    completed = daemon.reconcile_completed_parents()
+    second = daemon.reconcile_completed_parents()
+
+    assert completed == 0
+    assert second == 0
+    assert tracker.fetch_items_by_ids(["1"])[0].state == "Planning"
+    assert len(tracker.comments["1"]) == 1
+    assert "`CF-2` is `Rework`" in tracker.comments["1"][0]
+    assert [event.kind for event in store.list_events("parent-run")] == ["parent_blocked"]
+
+
+def test_daemon_leaves_planning_parent_waiting_when_a_child_is_active(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    config = FleetConfig(repo=repo, workspace=WorkspaceConfig(root=tmp_path / "workspaces")).resolved()
+    store = RunStore(tmp_path / "runs.sqlite3")
+    store.upsert_task_metadata(
+        item_id="2",
+        source="agent-followup",
+        depth=1,
+        parent_item_id="1",
+        parent_identifier="CF-1",
+        parent_run_id="parent-run",
+    )
+    store.upsert_task_metadata(
+        item_id="3",
+        source="agent-followup",
+        depth=1,
+        parent_item_id="1",
+        parent_identifier="CF-1",
+        parent_run_id="parent-run",
+    )
+    tracker = MemoryTracker(
+        [
+            WorkItem(id="1", identifier="CF-1", title="Parent", description=None, state="Planning"),
+            WorkItem(id="2", identifier="CF-2", title="Child one", description=None, state="Done"),
+            WorkItem(id="3", identifier="CF-3", title="Child two", description=None, state="Running"),
+        ]
+    )
+    daemon = FleetDaemon(config, fake_runner=True)
+    daemon.store = store
+    daemon.tracker = tracker
+
+    completed = daemon.reconcile_completed_parents()
+
+    assert completed == 0
+    assert tracker.fetch_items_by_ids(["1"])[0].state == "Planning"
+    assert "1" not in tracker.comments
+
+
 def test_multi_project_daemon_polls_registered_plane_projects(tmp_path: Path, monkeypatch) -> None:
     control = tmp_path / "control"
     app = tmp_path / "app"

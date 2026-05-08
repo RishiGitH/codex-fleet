@@ -14,10 +14,13 @@ from codex_fleet.capture import capture_command
 from codex_fleet.config import FleetConfig, load_config, write_default_config
 from codex_fleet.context_pack import write_context_pack
 from codex_fleet.daemon import MultiProjectFleetDaemon as FleetDaemon
+from codex_fleet.daemon import ProjectDaemonTick
 from codex_fleet.doctor import render_report, scan_repo
 from codex_fleet.factory import build_plane_client, build_runner, build_tracker, default_store_path
 from codex_fleet.harness import apply_harness, plan_harness
 from codex_fleet.lifecycle import (
+    RuntimeRecord,
+    read_runtime_record,
     remove_runtime_record,
     stop_loopback_ports,
     stop_plane_runtime,
@@ -37,6 +40,7 @@ from codex_fleet.local_api import (
 from codex_fleet.local_ui import create_local_ui_server
 from codex_fleet.models import WorkItem
 from codex_fleet.orchestrator import Orchestrator
+from codex_fleet.plane import PlaneClient
 from codex_fleet.plane_bootstrap import check_plane_readiness, ensure_plane_bootstrap
 from codex_fleet.plane_local_bootstrap import PlaneLocalBootstrapError, bootstrap_local_plane
 from codex_fleet.plane_manager import (
@@ -76,6 +80,8 @@ from codex_fleet.store import RunStore
 from codex_fleet.tracker import MemoryTracker
 
 console = Console()
+
+DEFAULT_PLANE_PREVIEW_PORT = 17300
 
 
 @click.group()
@@ -481,7 +487,7 @@ def plane_onboarding_url(repo: Path, project_path: Path | None, plane_url: str, 
 @main.command("plane-fork-preview")
 @click.option("--repo", type=click.Path(path_type=Path), default=Path.cwd())
 @click.option("--host", default=DEFAULT_LOCAL_API_HOST, show_default=True)
-@click.option("--port", type=int, default=3000, show_default=True)
+@click.option("--port", type=int, default=DEFAULT_PLANE_PREVIEW_PORT, show_default=True)
 @click.option("--project-path", type=click.Path(path_type=Path), default=None, help="Project folder to prefill.")
 @click.option("--no-open", is_flag=True)
 @click.option("--unsafe-allow-remote", is_flag=True, help="Allow binding outside loopback.")
@@ -746,37 +752,31 @@ def up(repo: Path, fake: bool, fake_fail: bool, once: bool, sleep_seconds: float
     """Main local entrypoint. Starts local Plane, then starts the loop."""
     repo = repo.expanduser().absolute()
     config_path = repo / ".codex-fleet.yml"
+    plane_client: PlaneClient | None = None
     if not config_path.exists():
-        console.print("No codex-fleet config found. Starting local Plane without creating a project.")
+        console.print("No codex-fleet config found. Bootstrapping local Plane.")
         try:
-            start_plane(repo, url=DEFAULT_PLANE_URL)
-            status = wait_for_plane(DEFAULT_PLANE_URL)
-            console.print(f"Plane URL: {DEFAULT_PLANE_URL}")
-            console.print(f"Plane ready: {status.ready} ({status.message})")
-            if status.ready and not stock_plane:
-                console.print("Installing branded codex-fleet Plane frontend...")
-                build_dir = _ensure_plane_frontend_build(repo)
-                frontend = install_branded_plane_frontend(repo, build_dir)
-                console.print(f"{frontend.message} Container: {frontend.container}")
-        except (PlaneManagerError, PlanePreviewError) as exc:
+            config = _bootstrap_default_local_plane_config(repo, DEFAULT_PLANE_URL)
+            plane_client = build_plane_client(config)
+        except (PlaneManagerError, PlaneLocalBootstrapError, ValueError) as exc:
             console.print(f"Local Plane could not be prepared automatically: {exc}")
-        console.print("Opening project setup. Create or link a project from the UI.")
-        _serve_plane_fork_onboarding(
-            repo,
-            project_path=repo,
-            host=DEFAULT_LOCAL_API_HOST,
-            port=3000,
-            no_open=False,
-            unsafe_allow_remote=False,
-            once=once,
-        )
-        return
+            console.print("Opening fallback onboarding. Create or link a project from the UI.")
+            _serve_plane_fork_onboarding(
+                repo,
+                project_path=repo,
+                host=DEFAULT_LOCAL_API_HOST,
+                port=DEFAULT_PLANE_PREVIEW_PORT,
+                no_open=False,
+                unsafe_allow_remote=False,
+                once=once,
+            )
+            return
     else:
         config = load_config(repo)
     if config.tracker.kind == "plane":
         plane_url = config.tracker.plane_base_url or DEFAULT_PLANE_URL
         try:
-            plane_client = build_plane_client(config)
+            plane_client = plane_client or build_plane_client(config)
         except ValueError as exc:
             if _is_loopback_url(plane_url):
                 console.print(f"Configured Plane is missing a required setting: {exc}")
@@ -791,7 +791,7 @@ def up(repo: Path, fake: bool, fake_fail: bool, once: bool, sleep_seconds: float
                         repo,
                         project_path=repo,
                         host=DEFAULT_LOCAL_API_HOST,
-                        port=3000,
+                        port=DEFAULT_PLANE_PREVIEW_PORT,
                         no_open=False,
                         unsafe_allow_remote=False,
                         once=once,
@@ -835,7 +835,7 @@ def up(repo: Path, fake: bool, fake_fail: bool, once: bool, sleep_seconds: float
                 repo,
                 project_path=repo,
                 host=DEFAULT_LOCAL_API_HOST,
-                port=3000,
+                port=DEFAULT_PLANE_PREVIEW_PORT,
                 no_open=False,
                 unsafe_allow_remote=False,
                 once=once,
@@ -860,13 +860,9 @@ def up(repo: Path, fake: bool, fake_fail: bool, once: bool, sleep_seconds: float
     api_server: LocalApiServer | None = None
     if config.tracker.kind == "plane" and _is_loopback_url(config.tracker.plane_base_url or "") and not once:
         api_host = _loopback_host_for_url(config.tracker.plane_base_url or DEFAULT_PLANE_URL)
-        try:
-            api_server = create_local_api_server(config.repo, host=api_host, port=DEFAULT_LOCAL_API_PORT)
-        except LocalApiError as exc:
-            raise click.ClickException(f"codex-fleet local API could not be started: {exc}") from exc
+        api_server, api_url = _create_local_api_server_with_fallback(config.repo, host=api_host)
         api_thread = threading.Thread(target=api_server.serve_forever, daemon=True)
         api_thread.start()
-        api_url = f"http://{api_host}:{DEFAULT_LOCAL_API_PORT}"
         console.print(f"codex-fleet API: {api_url}")
         console.print("Plane run controls can use the local API token from .codex-fleet/secrets/local_api_token.")
         board_path = _plane_board_path(config)
@@ -907,21 +903,46 @@ def up(repo: Path, fake: bool, fake_fail: bool, once: bool, sleep_seconds: float
 
 @main.command("down")
 @click.option("--repo", type=click.Path(path_type=Path), default=Path.cwd())
-@click.option("--preview-port", type=int, default=3000, show_default=True)
+@click.option("--preview-port", type=int, default=DEFAULT_PLANE_PREVIEW_PORT, show_default=True)
 @click.option("--api-port", type=int, default=DEFAULT_LOCAL_API_PORT, show_default=True)
 @click.option("--plane/--no-plane", default=True, show_default=True, help="Stop local self-host Plane Docker runtime.")
 @click.option("--ports/--no-ports", default=True, show_default=True, help="Stop local preview/API listeners by port.")
 def down(repo: Path, preview_port: int, api_port: int, plane: bool, ports: bool) -> None:
     """Stop local codex-fleet preview/API services and local Plane when present."""
     repo = repo.expanduser().absolute()
+    runtime = read_runtime_record(repo)
     results = [stop_runtime_process(repo)]
     if ports:
-        results.extend(stop_loopback_ports([api_port, preview_port]))
+        results.extend(stop_loopback_ports(_runtime_ports(runtime, defaults=[api_port, preview_port])))
     if plane:
         results.append(stop_plane_runtime(repo))
     for result in results:
         status = "stopped" if result.stopped else "skip"
         console.print(f"{status.upper()} {result.target}: {result.message}")
+
+
+def _create_local_api_server_with_fallback(repo: Path, *, host: str) -> tuple[LocalApiServer, str]:
+    try:
+        server = create_local_api_server(repo, host=host, port=DEFAULT_LOCAL_API_PORT)
+    except OSError:
+        server = create_local_api_server(repo, host=host, port=0)
+    except LocalApiError as exc:
+        raise click.ClickException(f"codex-fleet local API could not be started: {exc}") from exc
+    actual_host, actual_port = server.server_address[:2]
+    host_text = host if host in {"127.0.0.1", "localhost"} else str(actual_host)
+    return server, f"http://{host_text}:{actual_port}"
+
+
+def _runtime_ports(record: RuntimeRecord | None, *, defaults: list[int]) -> list[int]:
+    ports: list[int] = []
+    for url in (record.url, record.api_url) if record is not None else ():
+        if not url:
+            continue
+        port = urlparse(url).port
+        if port is not None:
+            ports.append(port)
+    ports.extend(defaults)
+    return list(dict.fromkeys(ports))
 
 
 def _serve_plane_fork_onboarding(
@@ -947,7 +968,7 @@ def _serve_plane_fork_onboarding(
                 "Preparing branded Plane fork: installing web dependencies and building Plane UI."
             )
     try:
-        api_server = create_local_api_server(repo, host=host, port=DEFAULT_LOCAL_API_PORT)
+        api_server, api_url = _create_local_api_server_with_fallback(repo, host=host)
         preview_server = create_plane_preview_server(
             repo,
             host=host,
@@ -966,17 +987,17 @@ def _serve_plane_fork_onboarding(
         repo,
         plane_url=preview_server.url,
         project_path=project_path or repo,
-        api_url=f"http://{host}:{DEFAULT_LOCAL_API_PORT}",
+        api_url=api_url,
     )
-    console.print(f"codex-fleet API: http://{host}:{DEFAULT_LOCAL_API_PORT}")
+    console.print(f"codex-fleet API: {api_url}")
     console.print(f"Plane fork URL: {preview_server.url}")
-    console.print(f"Onboarding URL: {url}")
+    console.print(f"Fallback onboarding URL: {url}")
     console.print("The local API token is in the URL fragment and is intended only for loopback use.")
     write_runtime_record(
         repo,
         kind="plane-fork-preview",
         url=preview_server.url,
-        api_url=f"http://{host}:{DEFAULT_LOCAL_API_PORT}",
+        api_url=api_url,
     )
     if not no_open and not once:
         open_plane(url)
@@ -1053,7 +1074,7 @@ def _print_watch_banner(config: FleetConfig, *, fake: bool, fake_fail: bool) -> 
     console.print(f"Runner: {runner}")
 
 
-def _daemon_tick_logger(tick_number: int, tick_results: list[object]) -> None:
+def _daemon_tick_logger(tick_number: int, tick_results: list[ProjectDaemonTick]) -> None:
     dispatched = 0
     quiet_messages = 0
     timestamp = time.strftime("%H:%M:%S")
