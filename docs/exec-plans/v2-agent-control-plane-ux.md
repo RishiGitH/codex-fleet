@@ -423,4 +423,3 @@ Do not use the user's active browser profile if a background or temporary profil
 - Token usage parsing depends on Codex CLI output format and must be optional.
 - Full Agent mode can create noisy work unless depth/count limits are enforced in deterministic code.
 - Large run logs can bloat Plane comments and future prompts; keep raw output in artifacts/events.
-
