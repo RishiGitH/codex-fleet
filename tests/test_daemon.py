@@ -94,7 +94,7 @@ def test_daemon_releases_stale_ready_claim_and_dispatches(tmp_path: Path) -> Non
     assert tracker.comments["1"][0].startswith("codex-fleet released a stale run claim")
 
 
-def test_daemon_reports_stale_running_claim_to_rework(tmp_path: Path) -> None:
+def test_daemon_reports_stale_running_claim_to_needs_input(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     init_git_repo(repo)
@@ -117,7 +117,7 @@ def test_daemon_reports_stale_running_claim_to_rework(tmp_path: Path) -> None:
 
     assert result.dispatched is False
     assert result.message == "No candidate work items found."
-    assert tracker.fetch_items_by_ids(["1"])[0].state == "Rework"
+    assert tracker.fetch_items_by_ids(["1"])[0].state == "Needs Input"
     stale_run = store.get_run("stale-run")
     assert stale_run is not None
     assert stale_run.status == "stalled"
@@ -201,6 +201,37 @@ def test_daemon_keeps_planning_parent_blocked_when_child_needs_attention(tmp_pat
     assert len(tracker.comments["1"]) == 1
     assert "`CF-2` is `Rework`" in tracker.comments["1"][0]
     assert [event.kind for event in store.list_events("parent-run")] == ["parent_blocked"]
+
+
+def test_daemon_deduplicates_parent_blocked_comment_without_parent_run_id(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    config = FleetConfig(repo=repo, workspace=WorkspaceConfig(root=tmp_path / "workspaces")).resolved()
+    store = RunStore(tmp_path / "runs.sqlite3")
+    store.upsert_task_metadata(
+        item_id="2",
+        source="agent-followup",
+        depth=1,
+        parent_item_id="1",
+        parent_identifier="CF-1",
+    )
+    tracker = MemoryTracker(
+        [
+            WorkItem(id="1", identifier="CF-1", title="Parent", description=None, state="Planning"),
+            WorkItem(id="2", identifier="CF-2", title="Child", description=None, state="Needs Input"),
+        ]
+    )
+    daemon = FleetDaemon(config, fake_runner=True)
+    daemon.store = store
+    daemon.tracker = tracker
+
+    daemon.reconcile_completed_parents()
+    daemon.reconcile_completed_parents()
+
+    assert len(tracker.comments["1"]) == 1
+    assert "`CF-2` is `Needs Input`" in tracker.comments["1"][0]
+    assert [event.kind for event in store.list_events("parent:1")] == ["parent_blocked"]
 
 
 def test_daemon_leaves_planning_parent_waiting_when_a_child_is_active(tmp_path: Path) -> None:

@@ -30,10 +30,12 @@ class WorkspaceConfig(BaseModel):
 
 
 class CodexConfig(BaseModel):
-    runner: Literal["cli", "app-server"] = "cli"
-    command: str = "codex exec"
+    runner: Literal["cli", "app-server"] = "app-server"
+    command: str = "codex app-server"
     approval_policy: str = "on-request"
     sandbox_mode: str = "workspace-write"
+    model: str | None = None
+    reasoning_effort: str | None = None
     turn_timeout_ms: int = 3_600_000
     stall_timeout_ms: int = 300_000
     stream_logs: bool = True
@@ -111,10 +113,12 @@ def write_default_config(repo: Path, path: Path | None = None) -> Path:
         "workspace:\n"
         "  root: .codex-fleet/workspaces\n"
         "codex:\n"
-        "  runner: cli\n"
-        "  command: codex exec\n"
+        "  runner: app-server\n"
+        "  command: codex app-server\n"
         "  approval_policy: on-request\n"
         "  sandbox_mode: workspace-write\n"
+        "  model: gpt-5.5\n"
+        "  reasoning_effort: low\n"
         "  stream_logs: true\n"
         "token:\n"
         "  default_doc_limit: 8000\n"
@@ -167,10 +171,12 @@ def write_plane_tracker_config(
     raw.setdefault(
         "codex",
         {
-            "runner": "cli",
-            "command": "codex exec",
+            "runner": "app-server",
+            "command": "codex app-server",
             "approval_policy": "on-request",
             "sandbox_mode": "workspace-write",
+            "model": "gpt-5.5",
+            "reasoning_effort": "low",
             "turn_timeout_ms": 3_600_000,
             "stall_timeout_ms": 300_000,
             "stream_logs": True,

@@ -18,11 +18,13 @@ from codex_fleet.codex.app_server import AppServerClient, AppServerError
 from codex_fleet.models import (
     NeedsInput,
     ProposedTask,
+    RunMessage,
     RunResult,
     TokenUsage,
     WorkItem,
     WorkItemState,
 )
+from codex_fleet.planner import PlannerContractError, parse_planner_output
 
 
 class Runner(ABC):
@@ -65,20 +67,54 @@ class CodexAppServerRunner(Runner):
         command: str = "codex app-server",
         approval_policy: str = "on-request",
         sandbox_mode: str = "workspace-write",
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+        agent_role: str | None = None,
+        human_answers: list[dict[str, object]] | None = None,
         timeout_seconds: int = 3600,
     ) -> None:
         self.command = command
         self.approval_policy = approval_policy
         self.sandbox_mode = sandbox_mode
+        self.model = model
+        self.reasoning_effort = reasoning_effort
+        self.agent_role = agent_role
+        self.human_answers = human_answers or []
         self.timeout_seconds = timeout_seconds
 
     def run(self, item: WorkItem, workspace: Path) -> RunResult:
-        prompt = _prompt_for_item(item)
+        prompt = _prompt_for_item(item, role_override=self.agent_role, human_answers=self.human_answers)
+        role = self.agent_role or _role_for_item(item)
+        expected_role_line = f"Agent role: {_normalize_role(role)}"
+        if expected_role_line not in prompt:
+            return RunResult(
+                success=False,
+                summary="Codex App Server prompt role mismatch.",
+                error=f"Expected prompt to contain `{expected_role_line}`.",
+            )
+        output_path = workspace / ".codex-fleet-app-server-transcript.txt"
+        install_artifact, install_command, install_error = _ensure_dependencies(workspace)
+        if install_error:
+            install_needs_input = NeedsInput(
+                question=f"Dependency installation failed before Codex could run: {install_error}",
+                needed_to_continue=True,
+                suggested_state=WorkItemState.NEEDS_INPUT.value,
+            )
+            return RunResult(
+                success=False,
+                summary=install_needs_input.question,
+                test_commands=(install_command or "dependency install failed",),
+                artifacts=tuple(path for path in (install_artifact,) if path is not None),
+                needs_input=install_needs_input,
+                error=install_needs_input.question,
+            )
         client = AppServerClient(
             self.command,
             workspace,
             approval_policy=self.approval_policy,
             sandbox_mode=self.sandbox_mode,
+            model=self.model,
+            reasoning_effort=self.reasoning_effort,
             timeout_seconds=self.timeout_seconds,
         )
         try:
@@ -86,10 +122,77 @@ class CodexAppServerRunner(Runner):
         except (AppServerError, OSError) as exc:
             return RunResult(success=False, summary="Codex App Server failed.", error=str(exc))
 
+        messages = _app_server_messages(
+            item=item,
+            role=role,
+            prompt=prompt,
+            notifications=outcome.messages,
+            output_path=output_path,
+        )
+        transcript_text = "\n".join(message.content for message in messages if message.kind not in {"tool_result", "raw_event"})
+        output_path.write_text("\n\n".join(_format_run_message(message) for message in messages))
+        changed_files = tuple(_changed_files(workspace))
+        role = _normalize_role(role)
+        planner_failure = parse_planner_contract_failure(transcript_text, require_output=role == "planner")
+        needs_input: NeedsInput | None = parse_needs_input(transcript_text) or planner_failure
+        proposed_tasks = parse_planner_tasks(transcript_text) or parse_proposed_tasks(transcript_text)
+        if role == "planner" and needs_input is None and not proposed_tasks:
+            needs_input = NeedsInput(
+                question=(
+                    "Planner output was invalid: no durable child tasks were created. "
+                    "Return a codex-fleet-planner-output JSON block with at least one task."
+                ),
+                needed_to_continue=True,
+                suggested_state=WorkItemState.NEEDS_INPUT.value,
+            )
+        token_usage = parse_token_usage(transcript_text)
+        if needs_input is not None:
+            return RunResult(
+                success=False,
+                summary=needs_input.question,
+                changed_files=changed_files,
+                test_commands=tuple(command for command in (install_command, "reported by Codex App Server") if command),
+                artifacts=tuple(path for path in (install_artifact, output_path) if path is not None),
+                proposed_tasks=proposed_tasks,
+                needs_input=needs_input,
+                token_usage=token_usage,
+                messages=messages,
+                codex_thread_id=outcome.thread_id,
+                codex_turn_id=outcome.turn_id,
+                error=needs_input.question,
+            )
+        verification_artifact, verification_commands, verification_error = _verify_test_agent_output(workspace, role)
+        if role == "test_reviewer" and verification_error:
+            needs_input = NeedsInput(
+                question=f"Test Agent could not verify the app: {verification_error}",
+                needed_to_continue=True,
+                suggested_state=WorkItemState.NEEDS_INPUT.value,
+            )
+            return RunResult(
+                success=False,
+                summary=needs_input.question,
+                changed_files=changed_files,
+                test_commands=tuple(command for command in (install_command, *verification_commands, "reported by Codex App Server") if command),
+                artifacts=tuple(path for path in (install_artifact, output_path, verification_artifact) if path is not None),
+                proposed_tasks=proposed_tasks,
+                needs_input=needs_input,
+                token_usage=token_usage,
+                messages=messages,
+                codex_thread_id=outcome.thread_id,
+                codex_turn_id=outcome.turn_id,
+                error=needs_input.question,
+            )
         return RunResult(
             success=outcome.completed,
-            summary=f"Codex {outcome.summary} for {item.identifier}.",
-            test_commands=("reported by Codex",),
+            summary=_tail(transcript_text) or f"Codex {outcome.summary} for {item.identifier}.",
+            changed_files=changed_files,
+            test_commands=tuple(command for command in (install_command, *verification_commands, "reported by Codex App Server") if command),
+            artifacts=tuple(path for path in (install_artifact, output_path, verification_artifact) if path is not None),
+            proposed_tasks=proposed_tasks,
+            token_usage=token_usage,
+            messages=messages,
+            codex_thread_id=outcome.thread_id,
+            codex_turn_id=outcome.turn_id,
             error=None if outcome.completed else outcome.summary,
         )
 
@@ -158,8 +261,11 @@ class CodexCliRunner(Runner):
                 error=_tail(output) or f"Codex CLI exited with {completed.returncode}",
             )
         needs_input = parse_needs_input(output)
-        proposed_tasks = parse_proposed_tasks(output)
+        planner_needs_input = parse_planner_contract_failure(output)
+        proposed_tasks = parse_planner_tasks(output) or parse_proposed_tasks(output)
         token_usage = parse_token_usage(output)
+        if planner_needs_input is not None:
+            needs_input = planner_needs_input
         if needs_input is not None:
             return RunResult(
                 success=False,
@@ -236,20 +342,287 @@ def check_codex_cli_preflight(command_parts: list[str]) -> RunnerPreflight:
     return RunnerPreflight(True, "Codex CLI preflight passed.")
 
 
-def _prompt_for_item(item: WorkItem) -> str:
+def _prompt_for_item(
+    item: WorkItem,
+    *,
+    role_override: str | None = None,
+    human_answers: list[dict[str, object]] | None = None,
+) -> str:
     description = item.description or "No description provided."
+    role = _normalize_role(role_override) if role_override else _role_for_item(item)
+    role_contract = _role_prompt_contract(role)
+    answer_section = _human_answers_prompt_section(human_answers or [])
     return (
         f"Work item {item.identifier}: {item.title}\n\n"
+        f"Agent role: {role}\n\n"
         f"Description:\n{description}\n\n"
+        f"{answer_section}"
         "You are running inside codex-fleet. Do not call Plane directly; the daemon parses your final answer "
         "and updates Plane. Keep Plane-facing summaries concise and do not dump raw logs, secrets, or large diffs.\n\n"
-        "Make the smallest safe change, run relevant tests, and summarize changed files plus verification.\n\n"
+        f"{role_contract}\n\n"
         "If you are blocked on user input, include exactly one fenced block named `codex-fleet-needs-input` "
         "containing JSON with `question`, optional `needed_to_continue`, and optional `suggested_state`.\n\n"
-        "If separate follow-up work should become Plane tasks, include one fenced block named "
-        "`codex-fleet-proposed-tasks` containing a JSON array of objects with `title`, optional `description`, "
-        "optional `role`, optional `depends_on`, optional `suggested_state`, and optional `labels`. Do not include secrets."
+        "Only planner tasks may create durable child assignments. Planner output must be one fenced block named "
+        "`codex-fleet-planner-output` containing the required JSON object: `summary`, `tasks`, and `reviewers`. "
+        "Do not include secrets."
     )
+
+
+def _human_answers_prompt_section(human_answers: list[dict[str, object]]) -> str:
+    clean_answers: list[str] = []
+    for item in human_answers[-5:]:
+        question = str(item.get("question") or "").strip()
+        answer = str(item.get("answer") or "").strip()
+        if not answer:
+            continue
+        if question:
+            clean_answers.append(f"- Question: {question}\n  Answer: {answer}")
+        else:
+            clean_answers.append(f"- Answer: {answer}")
+    if not clean_answers:
+        return ""
+    return "Human answers since last run:\n" + "\n".join(clean_answers) + "\n\n"
+
+
+def _role_for_item(item: WorkItem) -> str:
+    labels = {label.lower().replace("-", "_") for label in item.labels}
+    for role in (
+        "planner",
+        "code_scout",
+        "implementer",
+        "quality_reviewer",
+        "security_reviewer",
+        "test_reviewer",
+        "delivery_manager",
+    ):
+        if f"agent_{role}" in labels:
+            return role
+    if "agent_harness_reviewer" in labels or "agent_token_reviewer" in labels:
+        return "quality_reviewer"
+    if "agent_test_agent" in labels or "agent_qa_reviewer" in labels:
+        return "test_reviewer"
+    if "agent_reviewer" in labels:
+        return "reviewer"
+    return "implementer"
+
+
+def _normalize_role(role: str | None) -> str:
+    normalized = (role or "").strip().lower().replace("-", "_")
+    normalized = {
+        "harness_reviewer": "quality_reviewer",
+        "token_reviewer": "quality_reviewer",
+        "qa_reviewer": "test_reviewer",
+        "tester": "test_reviewer",
+        "test_agent": "test_reviewer",
+    }.get(normalized, normalized)
+    return (
+        normalized
+        if normalized
+        in {
+            "planner",
+            "code_scout",
+            "implementer",
+            "reviewer",
+            "quality_reviewer",
+            "security_reviewer",
+            "test_reviewer",
+            "delivery_manager",
+        }
+        else "implementer"
+    )
+
+
+def _app_server_messages(
+    *,
+    item: WorkItem,
+    role: str,
+    prompt: str,
+    notifications: tuple[dict[str, Any], ...],
+    output_path: Path,
+) -> tuple[RunMessage, ...]:
+    role = _normalize_role(role)
+    messages: list[RunMessage] = [
+        RunMessage(
+            sequence=0,
+            kind="chat_user",
+            content=prompt,
+            agent_role=role,
+            agent_name=_agent_display_name(role),
+        )
+    ]
+    sequence = 1
+    assistant_buffer: list[str] = []
+
+    def flush_assistant() -> None:
+        nonlocal sequence
+        content = "".join(assistant_buffer).strip()
+        assistant_buffer.clear()
+        if not content:
+            return
+        artifact_path = output_path if len(content) > 4000 else None
+        messages.append(
+            RunMessage(
+                sequence=sequence,
+                kind="chat_assistant",
+                content=content,
+                agent_role=role,
+                agent_name=_agent_display_name(role),
+                artifact_path=artifact_path,
+                payload={"source": "app-server-delta"},
+            )
+        )
+        sequence += 1
+
+    for payload in notifications:
+        kind, content = _message_from_app_server_payload(payload)
+        if kind == "assistant_delta":
+            assistant_buffer.append(content)
+            continue
+        if kind == "ignore":
+            continue
+        flush_assistant()
+        if not content:
+            continue
+        artifact_path = output_path if len(content) > 4000 else None
+        messages.append(
+            RunMessage(
+                sequence=sequence,
+                kind=kind,
+                content=_tail(content, limit=4000),
+                agent_role=role,
+                agent_name=_agent_display_name(role),
+                artifact_path=artifact_path,
+                payload={"method": payload.get("method")},
+            )
+        )
+        sequence += 1
+    flush_assistant()
+    if len(messages) == 1:
+        messages.append(
+            RunMessage(
+                sequence=1,
+                kind="system_event",
+                content=f"Codex App Server completed turn for {item.identifier}.",
+                agent_role=role,
+                agent_name=_agent_display_name(role),
+            )
+        )
+    return tuple(messages)
+
+
+def _message_from_app_server_payload(payload: dict[str, Any]) -> tuple[str, str]:
+    method = str(payload.get("method") or "")
+    params = payload.get("params")
+    content = _payload_text(params)
+    if method == "item/agentMessage/delta":
+        return "assistant_delta", content
+    if _is_protocol_noise(method, content):
+        return "ignore", ""
+    if not content:
+        if method in {
+            "thread/status/changed",
+            "turn/started",
+            "skills/changed",
+            "mcpServer/startupStatus/updated",
+            "account/rateLimits/updated",
+            "item/started",
+            "item/completed",
+            "thread/tokenUsage/updated",
+            "turn/completed",
+        }:
+            return "ignore", ""
+        content = method
+    if method in {"turn/completed"}:
+        return "chat_assistant", content
+    if method in {"turn/failed", "turn/cancelled"}:
+        return "error", content
+    if "tool" in method and ("start" in method or "call" in method):
+        return "tool_call", content
+    if "tool" in method or "exec" in method or "command" in method:
+        return "tool_result", content
+    return "system_event", content
+
+
+def _is_protocol_noise(method: str, content: str) -> bool:
+    stripped = content.strip()
+    if stripped in {
+        "userMessage",
+        "assistantMessage",
+        "agentMessage",
+        "reasoning",
+        "codex",
+        "codex_apps",
+        "computer-use",
+        "turn/completed",
+        "item/completed",
+    }:
+        return True
+    if stripped.startswith(("item/", "turn/", "thread/")):
+        return True
+    if re.fullmatch(r"[0-9a-f]{8}-[0-9a-f-]{27,}", stripped):
+        return True
+    return method in {
+        "item/started",
+        "item/completed",
+        "thread/tokenUsage/updated",
+        "thread/status/changed",
+        "turn/completed",
+    }
+
+
+def _payload_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("text", "message", "summary", "output", "content", "delta"):
+            nested = value.get(key)
+            if isinstance(nested, str) and nested:
+                return nested
+        for nested in value.values():
+            text = _payload_text(nested)
+            if text:
+                return text
+    if isinstance(value, list):
+        parts = [_payload_text(item) for item in value]
+        return "".join(part for part in parts if part)
+    return ""
+
+
+def _agent_display_name(role: str) -> str:
+    return {
+        "planner": "Planner",
+        "code_scout": "Code Scout",
+        "implementer": "Implementer",
+        "reviewer": "Reviewer",
+        "quality_reviewer": "Quality Reviewer",
+        "security_reviewer": "Security Reviewer",
+        "test_reviewer": "Test Agent",
+        "delivery_manager": "Delivery Manager",
+    }.get(role, "Implementer")
+
+
+def _format_run_message(message: RunMessage) -> str:
+    return f"[{message.sequence}] {message.kind} {message.agent_name or ''}\n{message.content}"
+
+
+def _role_prompt_contract(role: str) -> str:
+    if role == "planner":
+        return (
+            "Plan only. Do not edit files. Return structured planner JSON for child Plane tasks with specific "
+            "instructions, dependencies, acceptance criteria, roles, and reviewers. The JSON must use task roles "
+            "only from code_scout, implementer, quality_reviewer, security_reviewer, and test_reviewer; use "
+            "reviewers only from quality_reviewer, security_reviewer, and test_reviewer. For code-changing tasks, "
+            "include quality_reviewer and test_reviewer unless the task is clearly non-runnable documentation."
+        )
+    if role in {"quality_reviewer", "security_reviewer", "reviewer"}:
+        return "Review only. Do not edit files. Report findings, residual risk, and verification gaps."
+    if role == "test_reviewer":
+        return "Test only. Do not edit product source. Run build/test/preview checks, capture screenshots or video when available, and report proof artifacts."
+    if role == "delivery_manager":
+        return "Prepare delivery instructions only. Do not push, merge, deploy, or open a pull request."
+    if role == "code_scout":
+        return "Explore only. Do not edit files. Report the relevant files, tests, risks, and recommended next tasks."
+    return "Implement only the assigned task, run relevant tests, and summarize changed files plus verification."
 
 
 def parse_proposed_tasks(output: str) -> tuple[ProposedTask, ...]:
@@ -266,6 +639,127 @@ def parse_proposed_tasks(output: str) -> tuple[ProposedTask, ...]:
             if task is not None:
                 tasks.append(task)
     return tuple(tasks)
+
+
+def parse_planner_tasks(output: str) -> tuple[ProposedTask, ...]:
+    tasks: list[ProposedTask] = []
+    for block in _planner_output_blocks(output):
+        try:
+            planner = parse_planner_output(block)
+        except PlannerContractError:
+            return ()
+        for task in planner.tasks:
+            tasks.append(
+                ProposedTask(
+                    title=task.title,
+                    description=task.description,
+                    role=task.role,
+                    depends_on=task.depends_on,
+                    labels=(f"priority-{task.priority}",),
+                )
+            )
+        implementer_titles = tuple(task.title for task in tasks if task.role == "implementer")
+        roles = {task.role for task in tasks}
+        for reviewer in planner.reviewers:
+            if reviewer in roles:
+                continue
+            tasks.append(
+                ProposedTask(
+                    title=f"Review implementation: {reviewer.replace('_', ' ')}",
+                    description="Review the completed implementation and report findings only.",
+                    role=reviewer,
+                    depends_on=implementer_titles,
+                )
+            )
+            roles.add(reviewer)
+        if "implementer" in roles:
+            if "quality_reviewer" not in roles:
+                tasks.append(
+                    ProposedTask(
+                        title="Quality review implementation",
+                        description="Review the implemented change for build correctness, harness fit, token/context efficiency, and residual risks. Do not edit product source.",
+                        role="quality_reviewer",
+                        depends_on=implementer_titles,
+                    )
+                )
+            if "test_reviewer" not in roles:
+                tasks.append(
+                    ProposedTask(
+                        title="Test implementation and record proof",
+                        description="Run the app or available tests, capture proof artifacts when possible, and report preview/test results. Do not edit product source.",
+                        role="test_reviewer",
+                        depends_on=implementer_titles,
+                    )
+                )
+        return tuple(tasks)
+    return ()
+
+
+def parse_planner_contract_failure(output: str, *, require_output: bool = False) -> NeedsInput | None:
+    blocks = _planner_output_blocks(output)
+    if require_output and not blocks:
+        return NeedsInput(
+            question="Planner output was invalid: missing codex-fleet-planner-output JSON block.",
+            needed_to_continue=True,
+            suggested_state=WorkItemState.NEEDS_INPUT.value,
+        )
+    for block in blocks:
+        try:
+            parse_planner_output(block)
+        except PlannerContractError as exc:
+            return NeedsInput(
+                question=f"Planner output was invalid: {exc}",
+                needed_to_continue=True,
+                suggested_state=WorkItemState.NEEDS_INPUT.value,
+            )
+    return None
+
+
+def _planner_output_blocks(output: str) -> list[str]:
+    blocks = _fenced_blocks(output, "codex-fleet-planner-output")
+    if blocks:
+        return blocks
+    recovered = _recover_planner_json_object(output)
+    return [recovered] if recovered else []
+
+
+def _recover_planner_json_object(output: str) -> str | None:
+    """Recover plain planner JSON when the model omitted the required fence."""
+    summary_index = output.find('"summary"')
+    tasks_index = output.find('"tasks"')
+    if summary_index == -1 or tasks_index == -1:
+        return None
+    start = output.rfind("{", 0, min(summary_index, tasks_index))
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(output)):
+        char = output[index]
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                candidate = output[start : index + 1].strip()
+                try:
+                    loads(candidate)
+                except ValueError:
+                    return None
+                return candidate
+    return None
 
 
 def parse_needs_input(output: str) -> NeedsInput | None:
@@ -487,6 +981,74 @@ def _proposed_task_from_raw(raw: Any) -> ProposedTask | None:
         suggested_state=suggested_state.strip()[:80] if isinstance(suggested_state, str) and suggested_state.strip() else None,
         labels=tuple(dict.fromkeys(clean_labels)),
     )
+
+
+def _ensure_dependencies(workspace: Path) -> tuple[Path | None, str | None, str | None]:
+    package_json = workspace / "package.json"
+    if package_json.exists() and not (workspace / "node_modules").exists():
+        if (workspace / "pnpm-lock.yaml").exists() and shutil.which("pnpm"):
+            command = "pnpm install"
+        elif (workspace / "yarn.lock").exists() and shutil.which("yarn"):
+            command = "yarn install"
+        else:
+            command = "npm install"
+        return _run_artifact_command(workspace, command, artifact_name=".codex-fleet-install.log", timeout_seconds=900)
+    pyproject = workspace / "pyproject.toml"
+    if pyproject.exists() and not (workspace / ".venv").exists() and shutil.which("uv"):
+        return _run_artifact_command(workspace, "uv sync", artifact_name=".codex-fleet-install.log", timeout_seconds=900)
+    return None, None, None
+
+
+def _verify_test_agent_output(workspace: Path, role: str) -> tuple[Path | None, tuple[str, ...], str | None]:
+    if role != "test_reviewer":
+        return None, (), None
+    package_json = workspace / "package.json"
+    if not package_json.exists():
+        artifact = workspace / ".codex-fleet-test-proof.txt"
+        artifact.write_text("No runnable web package detected. Test Agent skipped preview proof for this task.\n")
+        return artifact, ("test proof skipped: no package.json",), None
+    build_artifact, build_command, build_error = _run_artifact_command(
+        workspace,
+        "npm run build",
+        artifact_name=".codex-fleet-build.log",
+        timeout_seconds=900,
+    )
+    if build_error:
+        return build_artifact, tuple(command for command in (build_command,) if command), build_error
+    proof = workspace / ".codex-fleet-test-proof.txt"
+    proof.write_text(
+        "Test Agent proof\n"
+        f"- Build command: {build_command}\n"
+        "- Preview/video capture requires a runnable dev server and is recorded by browser E2E when available.\n"
+    )
+    return proof, tuple(command for command in (build_command, "test proof recorded") if command), None
+
+
+def _run_artifact_command(
+    workspace: Path,
+    command: str,
+    *,
+    artifact_name: str,
+    timeout_seconds: int,
+) -> tuple[Path, str, str | None]:
+    artifact = workspace / artifact_name
+    try:
+        completed = subprocess.run(
+            shlex.split(command),
+            cwd=workspace,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        artifact.write_text(str(exc))
+        return artifact, command, str(exc)
+    artifact.write_text(completed.stdout or "")
+    if completed.returncode != 0:
+        return artifact, command, _tail(completed.stdout or f"{command} exited with {completed.returncode}", limit=1000)
+    return artifact, command, None
 
 
 def _split_command(command: str) -> list[str] | None:

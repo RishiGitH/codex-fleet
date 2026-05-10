@@ -7,8 +7,10 @@ from codex_fleet.codex.protocol import (
     initialize_message,
     parse_json_line,
     response_result,
+    sandbox_policy_for_mode,
     thread_start_message,
     turn_start_message,
+    validate_app_server_turn_start_shape,
 )
 
 
@@ -29,6 +31,7 @@ def test_thread_start_message_contains_cwd_and_sandbox() -> None:
 
 
 def test_turn_start_message_contains_prompt_and_policy() -> None:
+    sandbox_policy = sandbox_policy_for_mode("workspace-write", writable_roots=["/repo"])
     payload = turn_start_message(
         3,
         thread_id="thread-1",
@@ -36,12 +39,21 @@ def test_turn_start_message_contains_prompt_and_policy() -> None:
         cwd="/repo",
         title="CF-1",
         approval_policy="on-request",
-        sandbox_policy={"mode": "workspace-write"},
+        sandbox_policy=sandbox_policy,
+        reasoning_effort="low",
     ).payload
 
     assert payload["method"] == "turn/start"
     assert payload["params"]["threadId"] == "thread-1"
     assert payload["params"]["input"][0]["text"] == "do work"
+    assert payload["params"]["sandboxPolicy"]["type"] == "workspaceWrite"
+    assert "mode" not in payload["params"]["sandboxPolicy"]
+    assert payload["params"]["effort"] == "low"
+    assert "reasoningEffort" not in payload["params"]
+
+
+def test_app_server_turn_start_shape_self_check_accepts_current_protocol() -> None:
+    validate_app_server_turn_start_shape()
 
 
 def test_response_result_validates_id_and_error() -> None:

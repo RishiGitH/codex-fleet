@@ -4,22 +4,20 @@ from codex_fleet.config import load_config
 from codex_fleet.plane_manager import (
     DEFAULT_PLANE_SOURCE_REF,
     DEFAULT_PLANE_SOURCE_URL,
-    apply_plane_customization_patch,
     branded_plane_frontend_status,
     check_docker_status,
-    default_plane_patch_path,
     default_plane_source_lock_path,
     ensure_plane_runtime_config,
-    ensure_plane_source,
-    export_plane_customization_patch,
     inspect_plane_runtime,
     inspect_plane_source,
     install_branded_plane_frontend,
     load_plane_source_lock,
+    require_plane_source,
     restore_stock_plane_frontend,
     start_plane,
     verify_plane_customization,
     write_plane_config,
+    write_plane_source_manifest,
 )
 
 
@@ -310,14 +308,7 @@ def test_inspect_plane_source_reports_missing_checkout(tmp_path: Path) -> None:
     source = inspect_plane_source(tmp_path)
 
     assert source.exists is False
-    assert source.source_dir == tmp_path / ".codex-fleet" / "plane-src"
-
-
-def test_default_plane_patch_path_falls_back_to_bundled_resource(tmp_path: Path) -> None:
-    patch = default_plane_patch_path(tmp_path)
-
-    assert patch.exists()
-    assert "codex-fleet/dashboard" in patch.read_text()
+    assert source.source_dir == tmp_path / "apps" / "plane"
 
 
 def test_default_plane_source_lock_matches_runtime_defaults() -> None:
@@ -326,40 +317,15 @@ def test_default_plane_source_lock_matches_runtime_defaults() -> None:
     assert default_plane_source_lock_path().exists()
     assert lock.source_url == DEFAULT_PLANE_SOURCE_URL
     assert lock.ref == DEFAULT_PLANE_SOURCE_REF
-    assert lock.patch_resource == "plane-codex-fleet.patch"
-    assert "runtime" in lock.strategy
+    assert "apps-plane" in lock.strategy
 
 
-def test_ensure_plane_source_clones_pins_and_writes_manifest(monkeypatch, tmp_path: Path) -> None:
-    calls: list[list[str]] = []
+def test_write_plane_source_manifest_requires_existing_apps_plane(tmp_path: Path) -> None:
+    root = tmp_path / "apps" / "plane"
+    (root / "apps" / "web").mkdir(parents=True)
+    (root / "package.json").write_text("{}\n")
 
-    monkeypatch.setattr("codex_fleet.plane_manager._require", lambda binary, message: None)
-
-    def fake_run(command, **kwargs):  # type: ignore[no-untyped-def]
-        calls.append(command)
-        cwd = kwargs.get("cwd")
-        if command[:2] == ["git", "clone"]:
-            target = Path(command[-1])
-            (target / ".git").mkdir(parents=True)
-        stdout = ""
-        if command[:4] == ["git", "config", "--get", "remote.origin.url"]:
-            stdout = "https://example.test/plane.git\n"
-        if command[:3] == ["git", "rev-parse", "HEAD"]:
-            stdout = "abc123\n"
-        assert cwd is None or isinstance(cwd, Path)
-
-        class Result:
-            returncode = 0
-            stderr = ""
-
-            def __init__(self, stdout: str) -> None:
-                self.stdout = stdout
-
-        return Result(stdout)
-
-    monkeypatch.setattr("subprocess.run", fake_run)
-
-    source = ensure_plane_source(
+    source = write_plane_source_manifest(
         tmp_path,
         source_url="https://example.test/plane.git",
         ref="abc123",
@@ -372,16 +338,27 @@ def test_ensure_plane_source_clones_pins_and_writes_manifest(monkeypatch, tmp_pa
     manifest = (source.source_dir / ".codex-fleet-plane-source.yml").read_text()
     assert "requested_ref: abc123" in manifest
     assert "lock_ref:" in manifest
-    assert "patch_resource: plane-codex-fleet.patch" in manifest
-    assert ["git", "fetch", "--depth", "1", "origin", "abc123"] in calls
-    assert ["git", "checkout", "abc123"] in calls
-    assert ["git", "reset", "--hard", "abc123"] in calls
-    assert ["git", "clean", "-fd"] in calls
+
+
+def test_require_plane_source_rejects_stale_runtime_source(tmp_path: Path) -> None:
+    root = tmp_path / "apps" / "plane"
+    (root / "apps" / "web").mkdir(parents=True)
+    (root / "package.json").write_text("{}\n")
+    (tmp_path / ".codex-fleet" / "plane-src").mkdir(parents=True)
+
+    try:
+        require_plane_source(tmp_path)
+    except RuntimeError as exc:
+        assert ".codex-fleet" in str(exc)
+        assert "apps/plane" in str(exc)
+    else:
+        raise AssertionError("stale runtime Plane source should be rejected")
 
 
 def test_verify_plane_customization_reports_required_branding(tmp_path: Path) -> None:
-    root = tmp_path / ".codex-fleet" / "plane-src"
+    root = tmp_path / "apps" / "plane"
     (root / ".git").mkdir(parents=True)
+    (root / "package.json").write_text("{}\n")
     (root / "apps/web/app/codex-fleet").mkdir(parents=True)
     (root / "apps/web/public").mkdir(parents=True)
     (root / "apps/web").mkdir(parents=True, exist_ok=True)
@@ -400,8 +377,10 @@ def test_verify_plane_customization_reports_required_branding(tmp_path: Path) ->
     (root / "apps/web/app/routes/core.ts").write_text(":workspaceSlug/settings/projects/:projectId/codex-fleet\n")
     (root / "apps/web/app/routes/extended.ts").write_text("codex-fleet/onboarding\ncodex-fleet/dashboard\n")
     (root / "apps/web/app/codex-fleet/local-api.ts").write_text(
-        "/api/work-items/\n/api/runs\n/api/folders/pick\nCodexFleetHarnessScan\n"
+        "/api/work-items/\n/api/runs\n/api/folders/pick\n/api/plane/login-url\n/api/plane/connect\nsessionExchangePromise\nCodexFleetHarnessScan\n"
     )
+    (root / "apps/web/app/codex-fleet/local-session-bootstrap.tsx").write_text("ensureCodexFleetLocalConnection\n")
+    (root / "apps/web/app/root.tsx").write_text("codex-fleet\nCodexFleetLocalSessionBootstrap\n")
     (root / "apps/web/app/codex-fleet/onboarding.tsx").write_text(
         "CodexFleetLocalApi\nChoose Folder\nharness.scan.commands\n"
     )
@@ -410,13 +389,24 @@ def test_verify_plane_customization_reports_required_branding(tmp_path: Path) ->
     )
     (root / "apps/web/ce/components/projects/create").mkdir(parents=True)
     (root / "apps/web/ce/components/projects/create/root.tsx").write_text(
-        "Choose folder\nCodex workspace setup\nWhat should Codex build first?\nagent_task_mode\napply_harness\nCreate new project\nproject_type\nlocalProjectNotice\nCodexFleetLocalApi\nplaneProjectId\n"
+        "Choose folder\nCodex workspace setup\nWhat should Codex build first?\nAutomation mode\nMax depth\nworkflow_mode\napply_harness\nCreate new project\nproject_type\nlocalProjectNotice\nCodexFleetLocalApi\nReconnect Codex Fleet\nplaneProjectId\n"
     )
     (root / "apps/web/app/codex-fleet/work-item-run-panel.tsx").write_text("Run with Codex\nAgent proposed\n")
+    (root / "apps/web/app/codex-fleet/project-surfaces.tsx").write_text(
+        "apps/plane-codex-fleet-mission-control-v3\nLocal Mission Control\nAgent roster\nRaw settings\n"
+    )
     (root / "apps/web/core/components/issues/issue-modal").mkdir(parents=True)
     (root / "apps/web/core/components/issues/issue-modal/form.tsx").write_text(
-        "Codex task settings\ndata-codex-fleet-task-settings\n"
+        "Codex task settings\ndata-codex-fleet-task-settings\nAutomation mode\nplan_execute\n"
     )
+    (root / "apps/web/ce/components/sidebar").mkdir(parents=True)
+    (root / "apps/web/ce/components/sidebar/project-navigation-root.tsx").write_text(
+        "Fleet Logs\nAgents\nRuns\nArtifacts\nCodex Settings\n"
+    )
+    surface_root = root / "apps/web/app/(all)/[workspaceSlug]/(projects)/projects/(detail)/[projectId]"
+    for name in ("fleet-logs", "agents", "runs", "artifacts", "codex-settings"):
+        (surface_root / name).mkdir(parents=True, exist_ok=True)
+        (surface_root / name / "page.tsx").write_text(f"{name}\n")
     (root / "apps/web/core/components/issues/issue-detail").mkdir(parents=True)
     (root / "apps/web/core/components/issues/issue-detail/main-content.tsx").write_text("CodexFleetWorkItemRunPanel\n")
     (root / "apps/web/core/components/issues/issue-layouts/kanban").mkdir(parents=True)
@@ -432,6 +422,7 @@ def test_verify_plane_customization_reports_required_branding(tmp_path: Path) ->
     (root / "apps/web/core/components/settings/project/sidebar").mkdir(parents=True)
     (root / "apps/web/core/components/project/card.tsx").write_text("codex-fleet starter project\ncontrol center\n")
     (root / "apps/web/core/components/common/logo-spinner.tsx").write_text("codexFleetOrbit\n/codex-fleet-logo.svg\n")
+    (root / "apps/web/core/components/settings/project/sidebar/item-categories.tsx").write_text("codex_fleet\n")
     (root / "apps/web/core/components/settings/project/sidebar/item-icon.tsx").write_text("codex_fleet\n")
     (root / "apps/web/app/(all)/[workspaceSlug]/(settings)/settings/projects/[projectId]/codex-fleet").mkdir(parents=True)
     (root / "apps/web/app/(all)/[workspaceSlug]/(settings)/settings/projects/[projectId]/codex-fleet/page.tsx").write_text(
@@ -474,241 +465,3 @@ def test_verify_plane_customization_reports_required_branding(tmp_path: Path) ->
     report = verify_plane_customization(tmp_path)
 
     assert report.ok is True
-
-
-def test_plane_customization_patch_round_trips(tmp_path: Path) -> None:
-    source = tmp_path / ".codex-fleet" / "plane-src"
-    _init_minimal_plane_repo(source)
-    (source / "AGENTS.md").write_text("Plane must not shell out\n")
-    (source / "apps/web/app/root.tsx").write_text("codex-fleet\n")
-    (source / "apps/web/app/layout.tsx").write_text("codex-fleet\n")
-    (source / "apps/web/app/(home)").mkdir(parents=True, exist_ok=True)
-    (source / "apps/web/app/(home)/page.tsx").write_text(
-        "codex-fleet Star us on GitHub https://github.com/RishiGitH/codex-fleet Open project dashboard /codex-fleet/projects/ Connection setup Add or create projects from the dashboard's Add Project button\n"
-    )
-    (source / "apps/web/app/(all)/[workspaceSlug]/(projects)").mkdir(parents=True, exist_ok=True)
-    (source / "apps/web/app/(all)/[workspaceSlug]/(projects)/star-us-link.tsx").write_text(
-        "Star on GitHub\nhttps://github.com/RishiGitH/codex-fleet\n"
-    )
-    (source / "apps/web/app/routes/core.ts").write_text(":workspaceSlug/settings/projects/:projectId/codex-fleet\n")
-    (source / "apps/web/app/codex-fleet").mkdir(parents=True)
-    (source / "apps/web/app/codex-fleet/local-api.ts").write_text("CodexFleetHarnessScan\n/api/folders/pick\n")
-    (source / "apps/web/app/codex-fleet/onboarding.tsx").write_text("harness.scan.commands\nChoose Folder\n")
-    (source / "apps/web/app/codex-fleet/dashboard.tsx").write_text(
-        "Run Ready\nRun with Codex\nharness.scan.commands\nChoose Folder\nCreate project\nproject_type\nmin-h-dvh\n"
-    )
-    (source / "apps/web/ce/components/projects/create").mkdir(parents=True)
-    (source / "apps/web/ce/components/projects/create/root.tsx").write_text(
-        "Choose folder\nCodex workspace setup\nWhat should Codex build first?\nagent_task_mode\napply_harness\nCreate new project\nproject_type\nlocalProjectNotice\nCodexFleetLocalApi\nplaneProjectId\n"
-    )
-    (source / "apps/web/app/codex-fleet/work-item-run-panel.tsx").write_text("Run with Codex\nAgent proposed\n")
-    (source / "apps/web/core/components/issues/issue-modal").mkdir(parents=True)
-    (source / "apps/web/core/components/issues/issue-modal/form.tsx").write_text(
-        "Codex task settings\ndata-codex-fleet-task-settings\n"
-    )
-    (source / "apps/web/core/components/issues/issue-detail").mkdir(parents=True)
-    (source / "apps/web/core/components/issues/issue-detail/main-content.tsx").write_text("CodexFleetWorkItemRunPanel\n")
-    (source / "apps/web/core/components/issues/issue-layouts/kanban").mkdir(parents=True)
-    (source / "apps/web/core/components/issues/issue-layouts/kanban/block.tsx").write_text(
-        "CodexFleetWorkItemRunCompact\n"
-    )
-    (source / "apps/web/core/components/issues/issue-layouts/list").mkdir(parents=True)
-    (source / "apps/web/core/components/issues/issue-layouts/list/block.tsx").write_text(
-        "CodexFleetWorkItemRunCompact\n"
-    )
-    (source / "apps/web/core/components/project").mkdir(parents=True, exist_ok=True)
-    (source / "apps/web/core/components/common").mkdir(parents=True, exist_ok=True)
-    (source / "apps/web/core/components/settings/project/sidebar").mkdir(parents=True, exist_ok=True)
-    (source / "apps/web/core/components/project/card.tsx").write_text("codex-fleet starter project\ncontrol center\n")
-    (source / "apps/web/core/components/common/logo-spinner.tsx").write_text("codexFleetOrbit\n/codex-fleet-logo.svg\n")
-    (source / "apps/web/core/components/settings/project/sidebar/item-icon.tsx").write_text("codex_fleet\n")
-    (source / "apps/web/app/(all)/[workspaceSlug]/(settings)/settings/projects/[projectId]/codex-fleet").mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-    (source / "apps/web/app/(all)/[workspaceSlug]/(settings)/settings/projects/[projectId]/codex-fleet/page.tsx").write_text(
-        "codex-fleet project settings\n"
-    )
-    (source / "apps/web/public/codex-fleet-logo.svg").write_text("<svg />\n")
-    (source / "apps/api/plane/seeds/data").mkdir(parents=True, exist_ok=True)
-    (source / "apps/api/plane/seeds/data/projects.json").write_text('[{"name":"codex-fleet starter project"}]\n')
-    (source / "apps/api/plane/seeds/data/issues.json").write_text("codex-fleet\n")
-    (source / "apps/api/plane/seeds/data/cycles.json").write_text("codex-fleet\n")
-    (source / "apps/api/plane/seeds/data/pages.json").write_text("codex-fleet\n")
-    (source / "packages/i18n/src/locales/en").mkdir(parents=True, exist_ok=True)
-    (source / "packages/constants/src/settings").mkdir(parents=True, exist_ok=True)
-    (source / "packages/types/src").mkdir(parents=True, exist_ok=True)
-    (source / "packages/constants/src/settings/project.ts").write_text("codex_fleet\n")
-    (source / "packages/types/src/settings.ts").write_text("codex_fleet\n")
-    (source / "packages/i18n/src/locales/en/translations.ts").write_text('star_us_on_github: "codex-fleet"\n')
-    (source / "apps/web/core/components/account/auth-forms").mkdir(parents=True)
-    (source / "apps/web/core/components/account/auth-forms/auth-header.tsx").write_text("codex-fleet\n")
-    (source / "apps/web/app/error").mkdir(parents=True)
-    (source / "apps/web/app/error/prod.tsx").write_text("codex-fleet\n")
-    (source / "apps/web/app/(all)/create-workspace").mkdir(parents=True)
-    (source / "apps/web/app/(all)/create-workspace/page.tsx").write_text("codex-fleet-logo\n")
-    (source / "apps/web/app/(all)/invitations").mkdir(parents=True)
-    (source / "apps/web/app/(all)/invitations/page.tsx").write_text("codex-fleet-logo\n")
-    (source / "apps/web/app/(all)/workspace-invitations").mkdir(parents=True)
-    (source / "apps/web/app/(all)/workspace-invitations/page.tsx").write_text("codex-fleet\n")
-
-    patch = export_plane_customization_patch(tmp_path)
-
-    fresh = tmp_path / "fresh-plane"
-    _init_minimal_plane_repo(fresh)
-    apply_plane_customization_patch(tmp_path, source_dir=fresh, patch_path=patch)
-
-    assert (fresh / "apps/web/app/codex-fleet/dashboard.tsx").read_text() == (
-        "Run Ready\nRun with Codex\nharness.scan.commands\nChoose Folder\nCreate project\nproject_type\nmin-h-dvh\n"
-    )
-    assert "CodexFleetHarnessScan" in (fresh / "apps/web/app/codex-fleet/local-api.ts").read_text()
-    assert "/api/folders/pick" in (fresh / "apps/web/app/codex-fleet/local-api.ts").read_text()
-    assert "harness.scan.commands" in (fresh / "apps/web/app/codex-fleet/onboarding.tsx").read_text()
-    assert "Choose Folder" in (fresh / "apps/web/app/codex-fleet/onboarding.tsx").read_text()
-    fresh_create = (fresh / "apps/web/ce/components/projects/create/root.tsx").read_text()
-    assert "Choose folder" in fresh_create
-    assert "CodexFleetLocalApi" in fresh_create
-    assert "planeProjectId" in fresh_create
-    assert "localProjectNotice" in fresh_create
-    assert (fresh / "apps/web/app/codex-fleet/work-item-run-panel.tsx").exists()
-    assert "Codex task settings" in (fresh / "apps/web/core/components/issues/issue-modal/form.tsx").read_text()
-    assert "data-codex-fleet-task-settings" in (
-        fresh / "apps/web/core/components/issues/issue-modal/form.tsx"
-    ).read_text()
-    assert "CodexFleetWorkItemRunCompact" in (
-        fresh / "apps/web/core/components/issues/issue-layouts/kanban/block.tsx"
-    ).read_text()
-    assert "CodexFleetWorkItemRunCompact" in (
-        fresh / "apps/web/core/components/issues/issue-layouts/list/block.tsx"
-    ).read_text()
-    assert (fresh / "apps/web/public/codex-fleet-logo.svg").exists()
-    assert "codex-fleet" in (fresh / "apps/web/app/root.tsx").read_text()
-    assert "codex-fleet" in (fresh / "apps/web/app/(home)/page.tsx").read_text()
-    assert "codexFleetOrbit" in (fresh / "apps/web/core/components/common/logo-spinner.tsx").read_text()
-    assert "Plane Demo Project" not in (fresh / "apps/api/plane/seeds/data/projects.json").read_text()
-    assert "codex-fleet starter project" in (fresh / "apps/web/core/components/project/card.tsx").read_text()
-
-
-def test_plane_customization_patch_apply_is_idempotent(tmp_path: Path) -> None:
-    source = tmp_path / ".codex-fleet" / "plane-src"
-    _init_minimal_plane_repo(source)
-    (source / "AGENTS.md").write_text("Plane must not shell out\n")
-    (source / "apps/web/app/root.tsx").write_text("codex-fleet\n")
-    (source / "apps/web/app/layout.tsx").write_text("codex-fleet\n")
-    (source / "apps/web/app/(home)").mkdir(parents=True, exist_ok=True)
-    (source / "apps/web/app/(home)/page.tsx").write_text(
-        "codex-fleet Star us on GitHub https://github.com/RishiGitH/codex-fleet Open project dashboard /codex-fleet/projects/ Connection setup Add or create projects from the dashboard's Add Project button\n"
-    )
-    (source / "apps/web/app/(all)/[workspaceSlug]/(projects)").mkdir(parents=True, exist_ok=True)
-    (source / "apps/web/app/(all)/[workspaceSlug]/(projects)/star-us-link.tsx").write_text(
-        "Star on GitHub\nhttps://github.com/RishiGitH/codex-fleet\n"
-    )
-    (source / "apps/web/app/routes/core.ts").write_text(":workspaceSlug/settings/projects/:projectId/codex-fleet\n")
-    (source / "apps/web/app/routes/extended.ts").write_text("codex-fleet/onboarding\ncodex-fleet/dashboard\n")
-    (source / "apps/web/app/codex-fleet").mkdir(parents=True)
-    (source / "apps/web/app/codex-fleet/local-api.ts").write_text(
-        "/api/work-items/\n/api/runs\n/api/folders/pick\nCodexFleetHarnessScan\n"
-    )
-    (source / "apps/web/app/codex-fleet/onboarding.tsx").write_text("CodexFleetLocalApi\nChoose Folder\nharness.scan.commands\n")
-    (source / "apps/web/app/codex-fleet/dashboard.tsx").write_text(
-        "Run Ready\nRun with Codex\nChoose Folder\nCreate project\nproject_type\nharness.scan.commands\nmin-h-dvh\n"
-    )
-    (source / "apps/web/ce/components/projects/create").mkdir(parents=True)
-    (source / "apps/web/ce/components/projects/create/root.tsx").write_text(
-        "Choose folder\nCodex workspace setup\nWhat should Codex build first?\nagent_task_mode\napply_harness\nCreate new project\nproject_type\nlocalProjectNotice\nCodexFleetLocalApi\nplaneProjectId\n"
-    )
-    (source / "apps/web/app/codex-fleet/work-item-run-panel.tsx").write_text("Run with Codex\nAgent proposed\n")
-    (source / "apps/web/core/components/issues/issue-modal").mkdir(parents=True)
-    (source / "apps/web/core/components/issues/issue-modal/form.tsx").write_text(
-        "Codex task settings\ndata-codex-fleet-task-settings\n"
-    )
-    (source / "apps/web/core/components/issues/issue-detail").mkdir(parents=True)
-    (source / "apps/web/core/components/issues/issue-detail/main-content.tsx").write_text("CodexFleetWorkItemRunPanel\n")
-    (source / "apps/web/core/components/issues/issue-layouts/kanban").mkdir(parents=True)
-    (source / "apps/web/core/components/issues/issue-layouts/kanban/block.tsx").write_text(
-        "CodexFleetWorkItemRunCompact\n"
-    )
-    (source / "apps/web/core/components/issues/issue-layouts/list").mkdir(parents=True)
-    (source / "apps/web/core/components/issues/issue-layouts/list/block.tsx").write_text(
-        "CodexFleetWorkItemRunCompact\n"
-    )
-    (source / "apps/web/core/components/project").mkdir(parents=True, exist_ok=True)
-    (source / "apps/web/core/components/common").mkdir(parents=True, exist_ok=True)
-    (source / "apps/web/core/components/settings/project/sidebar").mkdir(parents=True, exist_ok=True)
-    (source / "apps/web/core/components/project/card.tsx").write_text("codex-fleet starter project\ncontrol center\n")
-    (source / "apps/web/core/components/common/logo-spinner.tsx").write_text("codexFleetOrbit\n/codex-fleet-logo.svg\n")
-    (source / "apps/web/core/components/settings/project/sidebar/item-icon.tsx").write_text("codex_fleet\n")
-    (source / "apps/web/app/(all)/[workspaceSlug]/(settings)/settings/projects/[projectId]/codex-fleet").mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-    (source / "apps/web/app/(all)/[workspaceSlug]/(settings)/settings/projects/[projectId]/codex-fleet/page.tsx").write_text(
-        "codex-fleet project settings\n"
-    )
-    (source / "apps/web/public/codex-fleet-logo.svg").write_text("<svg />\n")
-    (source / "apps/api/plane/seeds/data").mkdir(parents=True, exist_ok=True)
-    (source / "apps/api/plane/seeds/data/projects.json").write_text('[{"name":"codex-fleet starter project"}]\n')
-    (source / "apps/api/plane/seeds/data/issues.json").write_text("codex-fleet\n")
-    (source / "apps/api/plane/seeds/data/cycles.json").write_text("codex-fleet\n")
-    (source / "apps/api/plane/seeds/data/pages.json").write_text("codex-fleet\n")
-    (source / "packages/i18n/src/locales/en").mkdir(parents=True, exist_ok=True)
-    (source / "packages/constants/src/settings").mkdir(parents=True, exist_ok=True)
-    (source / "packages/types/src").mkdir(parents=True, exist_ok=True)
-    (source / "packages/constants/src/settings/project.ts").write_text("codex_fleet\n")
-    (source / "packages/types/src/settings.ts").write_text("codex_fleet\n")
-    (source / "packages/i18n/src/locales/en/translations.ts").write_text('star_us_on_github: "codex-fleet"\n')
-    (source / "apps/web/core/components/account/auth-forms").mkdir(parents=True)
-    (source / "apps/web/core/components/account/auth-forms/auth-header.tsx").write_text("codex-fleet\n")
-    (source / "apps/web/app/error").mkdir(parents=True)
-    (source / "apps/web/app/error/prod.tsx").write_text("codex-fleet\n")
-    (source / "apps/web/app/(all)/create-workspace").mkdir(parents=True)
-    (source / "apps/web/app/(all)/create-workspace/page.tsx").write_text("codex-fleet-logo\n")
-    (source / "apps/web/app/(all)/invitations").mkdir(parents=True)
-    (source / "apps/web/app/(all)/invitations/page.tsx").write_text("codex-fleet-logo\n")
-    (source / "apps/web/app/(all)/workspace-invitations").mkdir(parents=True)
-    (source / "apps/web/app/(all)/workspace-invitations/page.tsx").write_text("codex-fleet\n")
-    manifest = '{"name":"codex-fleet","icons":[{"src":"/codex-fleet-logo.svg"}]}'
-    (source / "apps/web/manifest.json").write_text(manifest)
-    (source / "apps/web/public/manifest.json").write_text(manifest)
-    (source / "apps/web/public/site.webmanifest.json").write_text(manifest)
-    (source / "apps/web/public/sw.js").write_text("registration.unregister\n")
-    (source / "apps/web/app/entry.client.tsx").write_text("@/lib/polyfills\n")
-    (source / "apps/web/core/components/issues").mkdir(parents=True, exist_ok=True)
-    (source / "apps/web/core/components/issues/filters.tsx").write_text("Fleet Logs\n")
-    (source / "apps/web/core/components/analytics/work-items/modal").mkdir(parents=True, exist_ok=True)
-    (source / "apps/web/core/components/analytics/work-items/modal/header.tsx").write_text("Fleet Logs for\n")
-    (source / "apps/web/core/components/analytics/work-items/modal/content.tsx").write_text("Task tree\n")
-    patch = tmp_path / "noop.patch"
-    patch.write_text("")
-
-    assert apply_plane_customization_patch(tmp_path, patch_path=patch) == source
-
-
-def _init_minimal_plane_repo(path: Path) -> None:
-    import subprocess
-
-    (path / "apps/web/app/routes").mkdir(parents=True)
-    (path / "apps/web/app/routes/core.ts").write_text("stock routes\n")
-    (path / "apps/web/public").mkdir(parents=True)
-    (path / "apps/web").mkdir(parents=True, exist_ok=True)
-    (path / "AGENTS.md").write_text("base\n")
-    (path / "apps/web/app/root.tsx").write_text("Plane\n")
-    (path / "apps/web/app/layout.tsx").write_text("Plane\n")
-    (path / "apps/web/app/(home)").mkdir(parents=True)
-    (path / "apps/web/app/(home)/page.tsx").write_text("Plane\nAuthBase\n")
-    (path / "apps/web/app/routes/extended.ts").write_text("export default [];\n")
-    (path / "apps/web/manifest.json").write_text('{"name":"Plane","icons":[]}\n')
-    (path / "apps/web/public/manifest.json").write_text('{"name":"Plane","icons":[]}\n')
-    (path / "apps/web/public/site.webmanifest.json").write_text('{"name":"Plane","icons":[]}\n')
-    (path / "apps/api/plane/seeds/data").mkdir(parents=True)
-    (path / "apps/api/plane/seeds/data/projects.json").write_text('[{"name":"Plane Demo Project"}]\n')
-    (path / "packages/i18n/src/locales/en").mkdir(parents=True)
-    (path / "packages/i18n/src/locales/en/translations.ts").write_text('star_us_on_github: "Star us on GitHub"\n')
-    (path / "apps/web/core/components/project").mkdir(parents=True)
-    (path / "apps/web/core/components/project/card.tsx").write_text("Plane Demo Project\n")
-    (path / "apps/web/public/sw.js").write_text("workbox\n")
-    subprocess.run(["git", "init"], cwd=path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=path, check=True)
-    subprocess.run(["git", "config", "user.name", "Test User"], cwd=path, check=True)
-    subprocess.run(["git", "add", "."], cwd=path, check=True)
-    subprocess.run(["git", "commit", "-m", "base"], cwd=path, check=True, capture_output=True)

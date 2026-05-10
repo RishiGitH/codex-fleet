@@ -327,7 +327,7 @@ _INDEX_HTML = """<!doctype html>
   </main>
   <script>
     const csrfToken = "__CSRF_TOKEN__";
-    const states = ["Backlog", "Ready", "Running", "Human Review", "Rework"];
+    const states = ["Backlog", "Ready", "Planning", "Running", "Needs Input", "Human Review", "Done"];
 
     async function api(path, options = {}) {
       const response = await fetch(path, options);

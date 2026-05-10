@@ -2,6 +2,7 @@ model = "gpt-5.5"
 model_reasoning_effort = "low"
 sandbox_mode = "workspace-write"
 approval_policy = "on-request"
+goals = true
 
 [agents]
 max_threads = 3
@@ -37,6 +38,9 @@ model = "gpt-5.4-mini"
 model_reasoning_effort = "high"
 sandbox_mode = "read-only"
 approval_policy = "never"
+
+[features]
+goals = true
 
 [agents.code_scout]
 description = "Read-only explorer for locating files, tests, symbols, and current behavior before implementation."

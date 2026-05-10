@@ -13,6 +13,24 @@ class ProjectRegistryError(ValueError):
     pass
 
 
+WORKFLOW_MODES = frozenset({"execute_only", "plan_only", "plan_execute", "full_auto"})
+AGENT_ROLES = frozenset(
+    {
+        "orchestrator",
+        "planner",
+        "code_scout",
+        "implementer",
+        "quality_reviewer",
+        "security_reviewer",
+        "test_reviewer",
+        "delivery_manager",
+        "human",
+        "reviewer",
+    }
+)
+LEGACY_CODEX_SETTING_KEYS = frozenset({"automation_mode", "agent_task_mode", "max_task_depth"})
+
+
 @dataclass(frozen=True)
 class LocalProject:
     id: int
@@ -28,28 +46,51 @@ class LocalProject:
 
 
 DEFAULT_CODEX_SETTINGS: dict[str, Any] = {
-    "runner_mode": "codex",
+    "runner_mode": "app-server",
     "default_model": "gpt-5.5",
     "reasoning_effort": "low",
     "approval_policy": "never",
     "sandbox_mode": "workspace-write",
     "max_parallel_agents": 3,
-    "max_task_depth": 2,
+    "max_depth": 2,
     "max_child_tasks_per_run": 8,
     "max_total_agent_created_tasks_per_parent": 20,
     "job_timeout_seconds": 1200,
-    "automation_mode": "assisted",
-    "agent_task_mode": "review_and_approve",
-    "agent_role": "worker",
+    "workflow_mode": "plan_execute",
+    "agent_role": "orchestrator",
     "skill_policy": "minimal",
+    "subagents_enabled": False,
+    "enabled_agent_roles": ["planner", "implementer", "quality_reviewer", "test_reviewer", "delivery_manager"],
     "max_prompt_protocol_tokens": 800,
     "max_plane_comment_chars": 4000,
+    "agent_profiles": {
+        "planner": {"model": "gpt-5.5", "reasoning_effort": "medium", "sandbox_mode": "workspace-write", "enabled": True},
+        "code_scout": {"model": "gpt-5.4-mini", "reasoning_effort": "high", "sandbox_mode": "workspace-write", "enabled": False},
+        "implementer": {"model": "gpt-5.5", "reasoning_effort": "low", "sandbox_mode": "workspace-write", "enabled": True},
+        "quality_reviewer": {"model": "gpt-5.4-mini", "reasoning_effort": "high", "sandbox_mode": "workspace-write", "enabled": True},
+        "security_reviewer": {"model": "gpt-5.5", "reasoning_effort": "medium", "sandbox_mode": "workspace-write", "enabled": False},
+        "test_reviewer": {"model": "gpt-5.4-mini", "reasoning_effort": "high", "sandbox_mode": "workspace-write", "enabled": True},
+        "delivery_manager": {"model": "gpt-5.4-mini", "reasoning_effort": "medium", "sandbox_mode": "workspace-write", "enabled": True},
+    },
     "subagents": {
-        "code_scout": {"model": "gpt-5.4-mini", "reasoning_effort": "medium", "sandbox_mode": "read-only"},
+        "planner": {"model": "gpt-5.5", "reasoning_effort": "medium", "sandbox_mode": "workspace-write"},
+        "code_scout": {"model": "gpt-5.4-mini", "reasoning_effort": "high", "sandbox_mode": "workspace-write"},
         "implementer": {"model": "gpt-5.5", "reasoning_effort": "low", "sandbox_mode": "workspace-write"},
-        "harness_reviewer": {"model": "gpt-5.4-mini", "reasoning_effort": "high", "sandbox_mode": "read-only"},
-        "security_reviewer": {"model": "gpt-5.5", "reasoning_effort": "medium", "sandbox_mode": "read-only"},
-        "token_reviewer": {"model": "gpt-5.4-mini", "reasoning_effort": "high", "sandbox_mode": "read-only"},
+        "quality_reviewer": {"model": "gpt-5.4-mini", "reasoning_effort": "high", "sandbox_mode": "workspace-write"},
+        "security_reviewer": {"model": "gpt-5.5", "reasoning_effort": "medium", "sandbox_mode": "workspace-write"},
+        "test_reviewer": {"model": "gpt-5.4-mini", "reasoning_effort": "high", "sandbox_mode": "workspace-write"},
+        "delivery_manager": {"model": "gpt-5.4-mini", "reasoning_effort": "medium", "sandbox_mode": "workspace-write"},
+    },
+    "delivery_policy": {
+        "create_draft_pr_on_success": True,
+        "merge_when_delivery_done": True,
+        "merge_strategy": "squash",
+        "cleanup_worktree_after_merge": True,
+    },
+    "test_policy": {
+        "record_video": True,
+        "capture_screenshots": True,
+        "require_preview_for_web_projects": True,
     },
 }
 
@@ -82,7 +123,7 @@ class ProjectRegistry:
                     plane_workspace_slug text,
                     plane_project_id text,
                     harness_status text not null default 'unknown',
-                    runner_mode text not null default 'codex',
+                    runner_mode text not null default 'app-server',
                     codex_settings text not null default '{}',
                     created_at text default current_timestamp,
                     updated_at text default current_timestamp
@@ -92,7 +133,7 @@ class ProjectRegistry:
             columns = {row["name"] for row in db.execute("pragma table_info(projects)").fetchall()}
             if "codex_settings" not in columns:
                 db.execute("alter table projects add column codex_settings text not null default '{}'")
-            db.execute("update projects set runner_mode = 'codex' where runner_mode = 'fake'")
+            db.execute("update projects set runner_mode = 'app-server' where runner_mode in ('fake', 'codex', 'cli')")
 
     def add_project(
         self,
@@ -102,7 +143,7 @@ class ProjectRegistry:
         slug: str | None = None,
         plane_workspace_slug: str | None = None,
         plane_project_id: str | None = None,
-        runner_mode: str = "codex",
+        runner_mode: str = "app-server",
         codex_settings: dict[str, Any] | None = None,
     ) -> LocalProject:
         resolved = validate_project_path(repo_path)
@@ -269,27 +310,35 @@ def normalize_codex_settings(raw: dict[str, Any] | None) -> dict[str, Any]:
     source = raw if isinstance(raw, dict) else {}
     settings = json.loads(json.dumps(DEFAULT_CODEX_SETTINGS))
     subagents = settings["subagents"]
+    legacy_keys = sorted(key for key in LEGACY_CODEX_SETTING_KEYS if key in source)
+    if legacy_keys:
+        joined = ", ".join(legacy_keys)
+        raise ProjectRegistryError(
+            f"Legacy Codex Fleet settings are no longer supported ({joined}). "
+            "Delete or reset local .codex-fleet runtime state and recreate the project."
+        )
     for key in (
         "runner_mode",
         "default_model",
         "reasoning_effort",
         "approval_policy",
         "sandbox_mode",
-        "agent_task_mode",
-        "automation_mode",
+        "workflow_mode",
+        "parent_workflow_mode",
         "agent_role",
         "skill_policy",
+        "settings_source",
     ):
         value = source.get(key)
         if isinstance(value, str) and value.strip():
             settings[key] = value.strip()
-    if "automation_mode" not in source and "agent_task_mode" in source:
-        settings["automation_mode"] = _automation_mode_from_agent_task_mode(settings["agent_task_mode"])
-    elif "automation_mode" in source:
-        settings["agent_task_mode"] = _agent_task_mode_from_automation_mode(settings["automation_mode"])
+    for key in ("subagents_enabled",):
+        value = source.get(key)
+        if isinstance(value, bool):
+            settings[key] = value
     for key in (
         "max_parallel_agents",
-        "max_task_depth",
+        "max_depth",
         "max_child_tasks_per_run",
         "max_total_agent_created_tasks_per_parent",
         "job_timeout_seconds",
@@ -299,38 +348,122 @@ def normalize_codex_settings(raw: dict[str, Any] | None) -> dict[str, Any]:
         value = source.get(key)
         if isinstance(value, int) and value > 0:
             settings[key] = value
+    raw_enabled_roles = source.get("enabled_agent_roles")
+    if isinstance(raw_enabled_roles, list):
+        enabled_roles = []
+        for role in raw_enabled_roles:
+            if not isinstance(role, str):
+                continue
+            normalized = _normalize_agent_role(role)
+            if normalized not in {"orchestrator", "human", "reviewer"} and normalized not in enabled_roles:
+                enabled_roles.append(normalized)
+        if enabled_roles:
+            settings["enabled_agent_roles"] = enabled_roles
+
     raw_subagents = source.get("subagents")
     if isinstance(raw_subagents, dict):
         for name, agent_settings in raw_subagents.items():
             if not isinstance(name, str) or not isinstance(agent_settings, dict):
                 continue
-            current = subagents.setdefault(name, {})
+            normalized_name = _normalize_agent_role(name)
+            current = subagents.setdefault(normalized_name, {})
             for key in ("model", "reasoning_effort", "sandbox_mode"):
                 value = agent_settings.get(key)
                 if isinstance(value, str) and value.strip():
                     current[key] = value.strip()
-    if settings["automation_mode"] not in {"manual", "assisted", "full_agent"}:
-        settings["automation_mode"] = "assisted"
-    settings["agent_task_mode"] = _agent_task_mode_from_automation_mode(str(settings["automation_mode"]))
+    raw_agent_profiles = source.get("agent_profiles")
+    if isinstance(raw_agent_profiles, dict):
+        profiles = settings["agent_profiles"]
+        for name, agent_settings in raw_agent_profiles.items():
+            if not isinstance(name, str) or not isinstance(agent_settings, dict):
+                continue
+            normalized_name = _normalize_agent_role(name)
+            if normalized_name in {"orchestrator", "human", "reviewer"}:
+                continue
+            current = profiles.setdefault(normalized_name, {})
+            for key in ("model", "reasoning_effort", "sandbox_mode"):
+                value = agent_settings.get(key)
+                if isinstance(value, str) and value.strip():
+                    current[key] = value.strip()
+            enabled = agent_settings.get("enabled")
+            if isinstance(enabled, bool):
+                current["enabled"] = enabled
+            if current.get("enabled") and normalized_name not in settings["enabled_agent_roles"]:
+                settings["enabled_agent_roles"].append(normalized_name)
+            subagent = subagents.setdefault(normalized_name, {})
+            for key in ("model", "reasoning_effort", "sandbox_mode"):
+                if key in current:
+                    subagent[key] = current[key]
+    raw_role_overrides = source.get("role_overrides")
+    if isinstance(raw_role_overrides, dict):
+        role_overrides: dict[str, dict[str, str]] = {}
+        for name, agent_settings in raw_role_overrides.items():
+            if not isinstance(name, str) or not isinstance(agent_settings, dict):
+                continue
+            normalized_role = _normalize_agent_role(name)
+            role_current: dict[str, str] = {}
+            for key in ("model", "reasoning_effort", "sandbox_mode"):
+                value = agent_settings.get(key)
+                if isinstance(value, str) and value.strip():
+                    role_current[key] = value.strip()
+            if role_current:
+                role_overrides[normalized_role] = role_current
+        if role_overrides:
+            settings["role_overrides"] = role_overrides
+    if settings["workflow_mode"] not in WORKFLOW_MODES:
+        settings["workflow_mode"] = "plan_execute"
+    if settings["runner_mode"] != "app-server":
+        settings["runner_mode"] = "app-server"
+    settings["agent_role"] = _normalize_agent_role(str(settings["agent_role"]))
+    settings["enabled_agent_roles"] = [
+        role
+        for role in (_normalize_agent_role(str(role)) for role in settings.get("enabled_agent_roles", []))
+        if role not in {"orchestrator", "human", "reviewer"}
+    ]
+    for role, profile in list(settings.get("agent_profiles", {}).items()):
+        normalized_role = _normalize_agent_role(str(role))
+        if normalized_role != role:
+            settings["agent_profiles"].pop(role, None)
+            settings["agent_profiles"][normalized_role] = profile
+    if settings["workflow_mode"] == "full_auto" and settings.get("subagents_enabled") is False:
+        settings["subagents_enabled"] = True
     if settings["skill_policy"] not in {"minimal", "auto", "full"}:
         settings["skill_policy"] = "minimal"
+    raw_human_answers = source.get("human_answers")
+    if isinstance(raw_human_answers, list):
+        human_answers: list[dict[str, str]] = []
+        for answer in raw_human_answers:
+            if not isinstance(answer, dict):
+                continue
+            text = answer.get("answer")
+            if not isinstance(text, str) or not text.strip():
+                continue
+            entry: dict[str, str] = {"answer": text.strip()}
+            for key in ("question", "run_id", "comment_id"):
+                value = answer.get(key)
+                if isinstance(value, str) and value.strip():
+                    entry[key] = value.strip()
+            human_answers.append(entry)
+        if human_answers:
+            settings["human_answers"] = human_answers[-10:]
     return dict(settings)
 
 
-def _automation_mode_from_agent_task_mode(value: str) -> str:
-    return {
-        "manual": "manual",
-        "review_and_approve": "assisted",
-        "agent_task_planner": "full_agent",
-    }.get(value, "assisted")
-
-
-def _agent_task_mode_from_automation_mode(value: str) -> str:
-    return {
-        "manual": "manual",
-        "assisted": "review_and_approve",
-        "full_agent": "agent_task_planner",
-    }.get(value, "review_and_approve")
+def _normalize_agent_role(value: str) -> str:
+    role = value.strip().lower().replace("-", "_") or "implementer"
+    role_aliases = {
+        "worker": "implementer",
+        "lead": "orchestrator",
+        "harness_reviewer": "quality_reviewer",
+        "token_reviewer": "quality_reviewer",
+        "qa_reviewer": "test_reviewer",
+        "tester": "test_reviewer",
+        "test_agent": "test_reviewer",
+    }
+    role = role_aliases.get(role, role)
+    if role not in AGENT_ROLES:
+        role = "implementer"
+    return role
 
 
 def _project_from_row(row: sqlite3.Row) -> LocalProject:
@@ -341,7 +474,7 @@ def _project_from_row(row: sqlite3.Row) -> LocalProject:
         raw_settings = {}
     settings = normalize_codex_settings(raw_settings if isinstance(raw_settings, dict) else {})
     row_runner_mode = str(row["runner_mode"])
-    if row_runner_mode and row_runner_mode != settings["runner_mode"]:
+    if row_runner_mode == "app-server" and row_runner_mode != settings["runner_mode"]:
         settings["runner_mode"] = row_runner_mode
     return LocalProject(
         id=int(row["id"]),
@@ -352,6 +485,6 @@ def _project_from_row(row: sqlite3.Row) -> LocalProject:
         plane_workspace_slug=row["plane_workspace_slug"],
         plane_project_id=row["plane_project_id"],
         harness_status=str(row["harness_status"]),
-        runner_mode=str(row["runner_mode"]),
+        runner_mode=str(settings["runner_mode"]),
         codex_settings=settings,
     )

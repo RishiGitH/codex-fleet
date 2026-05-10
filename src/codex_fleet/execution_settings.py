@@ -31,16 +31,8 @@ def codex_settings_from_work_item(item: WorkItem) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         return {}
     settings = {key: value for key, value in parsed.items() if key != "skills"}
-    if settings.get("agent_task_mode") == "project-default":
-        settings.pop("agent_task_mode", None)
-    if settings.get("automation_mode") == "project-default":
-        settings.pop("automation_mode", None)
-    if "agent_task_mode" in settings and "automation_mode" not in settings:
-        settings["automation_mode"] = {
-            "manual": "manual",
-            "review_and_approve": "assisted",
-            "agent_task_planner": "full_agent",
-        }.get(str(settings["agent_task_mode"]), "assisted")
+    if settings.get("workflow_mode") == "project-default":
+        settings.pop("workflow_mode", None)
     return settings
 
 
@@ -63,7 +55,10 @@ def merged_work_item_settings(
     )
     role = resolve_agent_role(item, store)
     role_settings = _role_profile_settings(settings, role)
-    return normalize_codex_settings({**settings, **role_settings, "agent_role": role})
+    settings_source = "role_override" if role_settings else "project_default"
+    if codex_settings_from_work_item(item):
+        settings_source = "task_override"
+    return normalize_codex_settings({**settings, **role_settings, "agent_role": role, "settings_source": settings_source})
 
 
 def resolve_agent_role(item: WorkItem, store: RunStore | None = None) -> str:
@@ -73,7 +68,7 @@ def resolve_agent_role(item: WorkItem, store: RunStore | None = None) -> str:
             return _normalize_role(metadata.role)
     labels = {label.lower() for label in item.labels}
     if "agent-lead" in labels:
-        return "lead"
+        return "orchestrator"
     if "agent-planner" in labels:
         return "planner"
     if "agent-code_scout" in labels or "agent-code-scout" in labels or "agent-scout" in labels:
@@ -81,14 +76,18 @@ def resolve_agent_role(item: WorkItem, store: RunStore | None = None) -> str:
     if "agent-security_reviewer" in labels or "agent-security-reviewer" in labels:
         return "security_reviewer"
     if "agent-token_reviewer" in labels or "agent-token-reviewer" in labels:
-        return "token_reviewer"
+        return "quality_reviewer"
     if "agent-harness_reviewer" in labels or "agent-harness-reviewer" in labels:
-        return "harness_reviewer"
+        return "quality_reviewer"
+    if "agent-quality_reviewer" in labels or "agent-quality-reviewer" in labels:
+        return "quality_reviewer"
+    if "agent-test_reviewer" in labels or "agent-test-reviewer" in labels or "agent-test-agent" in labels:
+        return "test_reviewer"
     if "agent-reviewer" in labels:
         return "reviewer"
     if "agent-worker" in labels:
-        return "worker"
-    return "worker"
+        return "implementer"
+    return "implementer"
 
 
 def settings_value(settings: dict[str, Any] | None, key: str) -> object:
@@ -96,21 +95,33 @@ def settings_value(settings: dict[str, Any] | None, key: str) -> object:
 
 
 def _normalize_role(role: str) -> str:
-    return role.strip().lower().replace("-", "_") or "worker"
+    normalized = role.strip().lower().replace("-", "_") or "implementer"
+    return {
+        "worker": "implementer",
+        "lead": "orchestrator",
+        "harness_reviewer": "quality_reviewer",
+        "token_reviewer": "quality_reviewer",
+        "qa_reviewer": "test_reviewer",
+        "tester": "test_reviewer",
+        "test_agent": "test_reviewer",
+    }.get(normalized, normalized)
 
 
 def _role_profile_settings(settings: dict[str, Any], role: str) -> dict[str, Any]:
-    subagents = settings.get("subagents")
-    if not isinstance(subagents, dict):
+    role_overrides = settings.get("role_overrides")
+    if not isinstance(role_overrides, dict):
+        role_overrides = {}
+    profile = role_overrides.get(role)
+    if not profile and not settings.get("subagents_enabled"):
         return {}
-    aliases = {
-        "lead": "implementer",
-        "planner": "code_scout",
-        "worker": "implementer",
-        "reviewer": "harness_reviewer",
-    }
-    profile_name = role if role in subagents else aliases.get(role, role)
-    profile = subagents.get(profile_name)
+    if not isinstance(profile, dict):
+        profiles = settings.get("agent_profiles")
+        if isinstance(profiles, dict):
+            profile = profiles.get(role)
+    if not isinstance(profile, dict):
+        subagents = settings.get("subagents")
+        if isinstance(subagents, dict):
+            profile = subagents.get(role)
     if not isinstance(profile, dict):
         return {}
     mapped: dict[str, Any] = {}
@@ -128,15 +139,9 @@ def config_with_codex_settings(config: FleetConfig, settings: dict[str, Any] | N
         return copy.deepcopy(config)
     normalized = normalize_codex_settings(settings)
     updated = copy.deepcopy(config)
-    runner_mode = normalized.get("runner_mode")
-    if runner_mode == "codex":
-        updated.codex.runner = "cli"
-        if "app-server" in updated.codex.command:
-            updated.codex.command = "codex exec"
-    elif runner_mode == "app-server":
-        updated.codex.runner = "app-server"
-        if updated.codex.command == "codex exec":
-            updated.codex.command = "codex app-server"
+    updated.codex.runner = "app-server"
+    if updated.codex.command == "codex exec":
+        updated.codex.command = "codex app-server"
     approval = normalized.get("approval_policy")
     if isinstance(approval, str) and approval.strip():
         updated.codex.approval_policy = approval.strip()
@@ -149,9 +154,12 @@ def config_with_codex_settings(config: FleetConfig, settings: dict[str, Any] | N
     max_agents = normalized.get("max_parallel_agents")
     if isinstance(max_agents, int) and max_agents > 0:
         updated.agent.max_concurrent_agents = max_agents
-    model = normalized.get("default_model")
-    if updated.codex.runner == "cli" and isinstance(model, str) and model.strip():
-        updated.codex.command = _codex_command_with_model(updated.codex.command, model.strip())
+    model = normalized.get("default_model") or normalized.get("model")
+    if isinstance(model, str) and model.strip():
+        updated.codex.model = model.strip()
+    reasoning_effort = normalized.get("reasoning_effort")
+    if isinstance(reasoning_effort, str) and reasoning_effort.strip():
+        updated.codex.reasoning_effort = reasoning_effort.strip()
     return updated
 
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import replace
 
-from codex_fleet.models import WorkItem, WorkItemState
+from codex_fleet.models import WorkItem, WorkItemComment, WorkItemState
 
 
 class TrackerError(RuntimeError):
@@ -26,6 +26,9 @@ class Tracker(ABC):
     @abstractmethod
     def create_comment(self, item_id: str, body: str) -> None:
         raise NotImplementedError
+
+    def list_comments(self, item_id: str) -> list[WorkItemComment]:
+        return []
 
     def create_work_item(
         self,
@@ -70,6 +73,18 @@ class MemoryTracker(Tracker):
             raise TrackerError(f"Unknown work item: {item_id}")
         self._comments.setdefault(item_id, []).append(body)
 
+    def list_comments(self, item_id: str) -> list[WorkItemComment]:
+        return [
+            WorkItemComment(
+                id=f"memory-{item_id}-{index}",
+                author_display_name="codex-fleet local" if _is_codex_fleet_comment(body) else "human",
+                created_at=None,
+                body_text=body,
+                is_codex_fleet=_is_codex_fleet_comment(body),
+            )
+            for index, body in enumerate(self._comments.get(item_id, []), start=1)
+        ]
+
     def create_work_item(
         self,
         *,
@@ -89,3 +104,8 @@ class MemoryTracker(Tracker):
         )
         self.add_item(item)
         return item
+
+
+def _is_codex_fleet_comment(body: str) -> bool:
+    normalized = body.strip().lower()
+    return normalized.startswith("codex-fleet") or "human answer for codex-fleet" in normalized

@@ -1,0 +1,12 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">codex-fleet logo</title>
+  <desc id="desc">A geometric fleet mark for codex-fleet.</desc>
+  <rect width="512" height="512" rx="112" fill="#0B1020"/>
+  <path d="M128 164L224 108L224 220L128 276L128 164Z" fill="#49D3FF"/>
+  <path d="M240 100L336 156L336 268L240 212L240 100Z" fill="#7CFFB2"/>
+  <path d="M352 172L416 210L416 322L352 284L352 172Z" fill="#F7C948"/>
+  <path d="M96 306L192 250L288 306L192 362L96 306Z" fill="#4F8CFF"/>
+  <path d="M208 370L304 314L416 378L320 434L208 370Z" fill="#A78BFA"/>
+  <path d="M224 236L336 300L336 412L224 348L224 236Z" fill="#FFFFFF" fill-opacity="0.12"/>
+  <path d="M96 306L192 362L192 250L96 194L96 306Z" fill="#FFFFFF" fill-opacity="0.08"/>
+</svg>

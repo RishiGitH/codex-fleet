@@ -52,14 +52,17 @@ class HarnessPlan:
 
 def plan_harness(repo: Path) -> HarnessPlan:
     repo = repo.expanduser().resolve()
+    scan = _scan_repo(repo)
     files = [
         _file(repo, "AGENTS.md", _agents_md()),
+        _file(repo, "README.md", _readme_md(repo)),
         _file(repo, "WORKFLOW.md", _workflow_md()),
+        _file(repo, ".codex-fleet/project.json", _project_json(repo, scan)),
         _file(repo, ".codex/config.toml", _codex_config()),
         _file(repo, ".codex/agents/code-scout.toml", _code_scout_agent()),
         _file(repo, ".agents/skills/repo-harness-review/SKILL.md", _repo_harness_skill()),
     ]
-    return HarnessPlan(repo=repo, files=tuple(files), scan=_scan_repo(repo))
+    return HarnessPlan(repo=repo, files=tuple(files), scan=scan)
 
 
 def apply_harness(repo: Path, *, overwrite: bool = False) -> list[Path]:
@@ -290,6 +293,45 @@ Document install, test, lint, and run commands here.
 """
 
 
+def _readme_md(repo: Path) -> str:
+    return f"""# {repo.name}
+
+Created or prepared by codex-fleet.
+
+## Development
+
+See `AGENTS.md` and `.codex-fleet/project.json` for detected commands and Codex runner defaults.
+"""
+
+
+def _project_json(repo: Path, scan: HarnessScan) -> str:
+    payload = {
+        "schema_version": 1,
+        "name": repo.name,
+        "repo_path": str(repo),
+        "git_root": str(scan.git_root) if scan.git_root is not None else None,
+        "stack": scan.stack,
+        "package_manager": scan.package_manager,
+        "commands": {
+            "install": scan.install_command,
+            "test": scan.test_command,
+            "lint": scan.lint_command,
+            "typecheck": scan.typecheck_command,
+            "build": scan.build_command,
+            "dev": scan.dev_command,
+        },
+        "codex": {
+            "workflow_mode": "plan_execute",
+            "model": "gpt-5.5",
+            "reasoning_effort": "low",
+            "approval_policy": "never",
+            "sandbox_mode": "workspace-write",
+            "max_depth": 2,
+        },
+    }
+    return json.dumps(payload, indent=2, sort_keys=True) + "\n"
+
+
 def _workflow_md() -> str:
     return """# WORKFLOW
 
@@ -331,7 +373,7 @@ def _code_scout_agent() -> str:
     return """name = \"code_scout\"
 description = \"Read-only repo explorer for finding relevant files and tests.\"
 model = \"gpt-5.4-mini\"
-model_reasoning_effort = \"medium\"
+model_reasoning_effort = \"high\"
 sandbox_mode = \"read-only\"
 
 developer_instructions = \"\"\"

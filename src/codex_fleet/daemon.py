@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from codex_fleet.config import FleetConfig, TrackerConfig, WorkspaceConfig, load_config
@@ -94,11 +95,13 @@ class FleetDaemon:
 
     def tick(self) -> OrchestratorResult:
         self.reconcile_stale_claims()
+        self.reconcile_needs_input_answers()
         self.reconcile_completed_parents()
         return self._run_one()
 
     def tick_many(self) -> list[OrchestratorResult]:
         self.reconcile_stale_claims()
+        self.reconcile_needs_input_answers()
         self.reconcile_completed_parents()
         limit = max(1, self.config.agent.max_concurrent_agents)
         results: list[OrchestratorResult] = []
@@ -114,6 +117,90 @@ class FleetDaemon:
         for claim in stale_claims:
             self._record_stale_claim(claim)
         return len(stale_claims)
+
+    def reconcile_needs_input_answers(self) -> int:
+        resolved = 0
+        for pending in self.store.list_open_needs_input():
+            items = self.tracker.fetch_items_by_ids([pending.item_id])
+            if not items or items[0].state.lower() != WorkItemState.NEEDS_INPUT.value.lower():
+                continue
+            try:
+                comments = self.tracker.list_comments(pending.item_id)
+            except Exception as exc:  # noqa: BLE001 - comment sync should not stop dispatch.
+                self.store.add_event(pending.run_id, "needs_input_comment_sync_failed", {"item_id": pending.item_id, "error": str(exc)})
+                continue
+            answer_comment = next(
+                (
+                    comment
+                    for comment in reversed(comments)
+                    if _is_human_answer_comment(comment, asked_at=pending.asked_at)
+                ),
+                None,
+            )
+            if answer_comment is None:
+                continue
+            self._resolve_needs_input(
+                pending.run_id,
+                item_id=pending.item_id,
+                question=pending.question,
+                answer=answer_comment.body_text,
+                answer_comment_id=answer_comment.id,
+            )
+            resolved += 1
+        return resolved
+
+    def _resolve_needs_input(
+        self,
+        run_id: str,
+        *,
+        item_id: str,
+        question: str,
+        answer: str,
+        answer_comment_id: str | None,
+    ) -> None:
+        clean_answer = answer.strip()
+        self.store.resolve_needs_input(run_id, answer=clean_answer, answer_comment_id=answer_comment_id)
+        self._append_human_answer(item_id, question=question, answer=clean_answer, run_id=run_id, comment_id=answer_comment_id)
+        self.store.add_event(
+            run_id,
+            "needs_input_resolved",
+            {"item_id": item_id, "answer_comment_id": answer_comment_id, "state": WorkItemState.READY.value},
+        )
+        self.tracker.create_comment(item_id, "codex-fleet captured your answer and moved this task back to Ready.")
+        self.tracker.update_item_state(item_id, WorkItemState.READY.value)
+
+    def _append_human_answer(
+        self,
+        item_id: str,
+        *,
+        question: str,
+        answer: str,
+        run_id: str,
+        comment_id: str | None,
+    ) -> None:
+        metadata = self.store.get_task_metadata(item_id)
+        if metadata is None:
+            self.store.upsert_task_metadata(
+                item_id=item_id,
+                source="human-answer",
+                settings={
+                    "human_answers": [
+                        {
+                            "question": question,
+                            "answer": answer,
+                            "run_id": run_id,
+                            "comment_id": comment_id,
+                        }
+                    ]
+                },
+            )
+            return
+        settings = dict(metadata.settings)
+        answers = settings.get("human_answers")
+        answer_list = [entry for entry in answers if isinstance(entry, dict)] if isinstance(answers, list) else []
+        answer_list.append({"question": question, "answer": answer, "run_id": run_id, "comment_id": comment_id})
+        settings["human_answers"] = answer_list[-10:]
+        self.store.update_task_settings(item_id, settings)
 
     def reconcile_completed_parents(self) -> int:
         completed = 0
@@ -159,7 +246,6 @@ class FleetDaemon:
         blocker_items: list[WorkItem],
         child_metadata: list[TaskMetadata],
     ) -> None:
-        run_id = child_metadata[0].parent_run_id
         payload = {
             "parent_item_id": parent.id,
             "blockers": [
@@ -167,15 +253,15 @@ class FleetDaemon:
                 for item in blocker_items
             ],
         }
-        if run_id is not None:
-            existing = [
-                event
-                for event in self.store.list_events(run_id)
-                if event.kind == "parent_blocked" and event.payload == payload
-            ]
-            if existing:
-                return
-            self.store.add_event(run_id, "parent_blocked", payload)
+        run_id = child_metadata[0].parent_run_id or _parent_event_run_id(parent.id)
+        existing = [
+            event
+            for event in self.store.list_events(run_id)
+            if event.kind == "parent_blocked" and event.payload == payload
+        ]
+        if existing:
+            return
+        self.store.add_event(run_id, "parent_blocked", payload)
         self.tracker.create_comment(parent.id, _parent_blocked_comment(blocker_items))
 
     def _run_one(self) -> OrchestratorResult:
@@ -197,11 +283,13 @@ class FleetDaemon:
             config_with_codex_settings(self.config, settings),
             fake=self.fake_runner,
             fake_succeed=self.fake_runner_succeed,
+            agent_role=str(settings.get("agent_role") or "implementer"),
+            human_answers=_human_answers_from_settings(settings),
         )
 
     def _agent_task_settings_for_item(self, item: WorkItem) -> tuple[str, int]:
         settings = self._settings_for_item(item)
-        return str(settings_value(settings, "agent_task_mode")), int(str(settings_value(settings, "max_task_depth")))
+        return str(settings_value(settings, "workflow_mode")), int(str(settings_value(settings, "max_depth")))
 
     def _claim_ttl_seconds(self) -> float:
         # A Codex turn may legitimately run much longer than the polling stall
@@ -240,7 +328,7 @@ class FleetDaemon:
             self.store.add_event(claim.run_id, "stale_claim_comment_failed", {"item_id": claim.item_id})
         if item.state == WorkItemState.RUNNING.value:
             try:
-                self.tracker.update_item_state(claim.item_id, WorkItemState.REWORK.value)
+                self.tracker.update_item_state(claim.item_id, WorkItemState.NEEDS_INPUT.value)
             except Exception:  # noqa: BLE001 - state failure is recorded for operator visibility.
                 self.store.add_event(claim.run_id, "stale_claim_state_update_failed", {"item_id": claim.item_id})
 
@@ -272,6 +360,41 @@ def _parent_blocked_comment(blocker_items: list[WorkItem]) -> str:
         f"{lines}\n\n"
         "Resolve the child task, then codex-fleet will reconcile the parent again."
     )
+
+
+def _parent_event_run_id(parent_item_id: str) -> str:
+    return f"parent:{parent_item_id}"
+
+
+def _human_answers_from_settings(settings: dict[str, object]) -> list[dict[str, object]]:
+    answers = settings.get("human_answers")
+    if not isinstance(answers, list):
+        return []
+    return [answer for answer in answers if isinstance(answer, dict)]
+
+
+def _is_human_answer_comment(comment: object, *, asked_at: str) -> bool:
+    if bool(getattr(comment, "is_codex_fleet", False)):
+        return False
+    body = str(getattr(comment, "body_text", "") or "").strip()
+    if not body:
+        return False
+    normalized = body.lower()
+    if normalized.startswith("codex-fleet") or "codex-fleet started run" in normalized:
+        return False
+    created_at = getattr(comment, "created_at", None)
+    if isinstance(created_at, datetime):
+        asked = _parse_store_datetime(asked_at)
+        if asked is not None and created_at.replace(tzinfo=None) <= asked.replace(tzinfo=None):
+            return False
+    return True
+
+
+def _parse_store_datetime(value: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def default_daemon_store(repo: Path) -> Path:

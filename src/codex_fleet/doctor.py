@@ -6,6 +6,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from codex_fleet.project_registry import ProjectRegistry, default_project_registry_path
+
 
 @dataclass(frozen=True)
 class DoctorFinding:
@@ -49,6 +51,41 @@ def scan_repo(repo: Path, *, codex_command: str = "codex exec") -> DoctorReport:
     missing(".codex/config.toml", "missing_codex_config", "Missing .codex/config.toml.", "Add project-level Codex defaults and subagent registrations.")
     missing(".env.example", "missing_env_example", "Missing .env.example.", "Document required environment variables without secrets.")
     missing("README.md", "missing_readme", "Missing README.md.", "Add setup and usage docs.")
+
+    if not (repo / "apps" / "plane").exists():
+        findings.append(
+            DoctorFinding(
+                "missing_apps_plane",
+                "error",
+                "Tracked Plane product source is missing at apps/plane.",
+                "Restore apps/plane from the repository. Codex Fleet no longer recreates Plane source under .codex-fleet.",
+            )
+        )
+    if (repo / ".codex-fleet" / "plane-src").exists():
+        findings.append(
+            DoctorFinding(
+                "stale_plane_src",
+                "error",
+                "Stale Plane runtime source exists at .codex-fleet/plane-src.",
+                "Delete .codex-fleet/plane-src. Plane product source now lives at apps/plane.",
+            )
+        )
+    for stale_path in (
+        "patches/plane-codex-fleet.patch",
+        "src/codex_fleet/resources/plane-codex-fleet.patch",
+        "scripts/plane-fork-clone",
+    ):
+        if (repo / stale_path).exists():
+            findings.append(
+                DoctorFinding(
+                    "stale_plane_patch_resource",
+                    "error",
+                    f"Removed Plane patch-system resource still exists: {stale_path}.",
+                    "Delete Plane patch resources. Codex Fleet now uses tracked apps/plane source only.",
+                )
+            )
+
+    findings.extend(_registered_project_findings(repo))
 
     has_tests = any((repo / path).exists() for path in ["tests", "test", "spec", "__tests__"])
     if not has_tests:
@@ -130,6 +167,65 @@ def _is_git_repo(repo: Path) -> bool:
     except OSError:
         return False
     return result.returncode == 0 and result.stdout.strip() == "true"
+
+
+def _registered_project_findings(repo: Path) -> list[DoctorFinding]:
+    registry_path = default_project_registry_path(repo)
+    if not registry_path.exists():
+        return []
+    findings: list[DoctorFinding] = []
+    try:
+        projects = ProjectRegistry(registry_path).list_projects()
+    except Exception as exc:  # noqa: BLE001 - doctor should report broken runtime state.
+        return [
+            DoctorFinding(
+                "project_registry_unreadable",
+                "warning",
+                f"Local project registry could not be read: {exc}",
+                "Delete or reset .codex-fleet/projects.sqlite3 if this local runtime state is stale.",
+            )
+        ]
+    for project in projects:
+        prefix = f"Registered project {project.name!r}"
+        if not project.repo_path.exists():
+            findings.append(
+                DoctorFinding(
+                    "registered_project_missing",
+                    "error",
+                    f"{prefix} folder is missing: {project.repo_path}",
+                    "Delete/reset stale .codex-fleet runtime state or recreate the local project.",
+                )
+            )
+            continue
+        if not _is_git_repo(project.repo_path):
+            findings.append(
+                DoctorFinding(
+                    "registered_project_not_git",
+                    "error",
+                    f"{prefix} is not a git repository.",
+                    "Initialize git in the project folder or recreate it through the Plane project flow.",
+                )
+            )
+        for relative in ("AGENTS.md", ".codex/config.toml", ".codex-fleet/project.json"):
+            if not (project.repo_path / relative).exists():
+                findings.append(
+                    DoctorFinding(
+                        "registered_project_harness_missing",
+                        "warning",
+                        f"{prefix} is missing harness file {relative}.",
+                        "Run the project harness apply action from Plane or `python -m codex_fleet apply-harness --repo <project>`.",
+                    )
+                )
+        if not project.plane_project_id:
+            findings.append(
+                DoctorFinding(
+                    "registered_project_plane_unlinked",
+                    "warning",
+                    f"{prefix} is not linked to a Plane project.",
+                    "Create/link the project from the Plane Add Project flow.",
+                )
+            )
+    return findings
 
 
 def _command_binary(command: str) -> str | None:

@@ -2,7 +2,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlparse
 
 import click
 import httpx
@@ -11,6 +11,7 @@ from rich.table import Table
 
 from codex_fleet.budget import scan_budget
 from codex_fleet.capture import capture_command
+from codex_fleet.codex.protocol import ProtocolError, validate_app_server_turn_start_shape
 from codex_fleet.config import FleetConfig, load_config, write_default_config
 from codex_fleet.context_pack import write_context_pack
 from codex_fleet.daemon import MultiProjectFleetDaemon as FleetDaemon
@@ -23,6 +24,7 @@ from codex_fleet.lifecycle import (
     read_runtime_record,
     remove_runtime_record,
     stop_loopback_ports,
+    stop_plane_app_containers,
     stop_plane_runtime,
     stop_runtime_process,
     write_runtime_record,
@@ -35,7 +37,6 @@ from codex_fleet.local_api import (
     build_onboarding_url,
     build_plane_login_url,
     create_local_api_server,
-    load_or_create_local_api_token,
 )
 from codex_fleet.local_ui import create_local_ui_server
 from codex_fleet.models import WorkItem
@@ -44,22 +45,16 @@ from codex_fleet.plane import PlaneClient
 from codex_fleet.plane_bootstrap import check_plane_readiness, ensure_plane_bootstrap
 from codex_fleet.plane_local_bootstrap import PlaneLocalBootstrapError, bootstrap_local_plane
 from codex_fleet.plane_manager import (
-    DEFAULT_PLANE_SOURCE_REF,
-    DEFAULT_PLANE_SOURCE_URL,
     DEFAULT_PLANE_URL,
     PlaneManagerError,
-    apply_plane_customization_patch,
     branded_plane_frontend_status,
     check_docker_status,
     check_plane_url,
     ensure_plane_runtime_config,
-    ensure_plane_source,
-    export_plane_customization_patch,
     inspect_plane_runtime,
-    inspect_plane_source,
     install_branded_plane_frontend,
-    load_plane_source_lock,
     open_plane,
+    require_plane_source,
     restore_stock_plane_frontend,
     start_plane,
     verify_plane_customization,
@@ -349,81 +344,17 @@ def plane_status(repo: Path, url: str) -> None:
     console.print(f"Plane ready: {status.ready} ({status.message})")
 
 
-@main.command("plane-source")
-@click.option("--repo", type=click.Path(path_type=Path), default=Path.cwd())
-@click.option("--url", "source_url", default=DEFAULT_PLANE_SOURCE_URL, show_default=True)
-@click.option("--ref", default=DEFAULT_PLANE_SOURCE_REF, show_default=True, help="Branch, tag, or commit to pin after cloning.")
-@click.option("--dir", "source_dir", type=click.Path(path_type=Path), default=None)
-@click.option("--status", "status_only", is_flag=True, help="Only inspect the Plane source checkout.")
-@click.option("--no-apply", is_flag=True, help="Do not apply the tracked codex-fleet Plane patch after cloning.")
-def plane_source(
-    repo: Path,
-    source_url: str,
-    ref: str | None,
-    source_dir: Path | None,
-    status_only: bool,
-    no_apply: bool,
-) -> None:
-    """Clone or inspect the local Plane source used for customization."""
-    try:
-        source = (
-            inspect_plane_source(repo.expanduser().absolute(), source_dir)
-            if status_only
-            else ensure_plane_source(
-                repo.expanduser().absolute(),
-                source_url=source_url,
-                ref=ref,
-                source_dir=source_dir,
-                apply_customizations=not no_apply,
-            )
-        )
-    except PlaneManagerError as exc:
-        raise click.ClickException(str(exc)) from exc
-    lock = load_plane_source_lock()
-    console.print(f"Plane source: {source.source_dir}")
-    console.print(f"Exists: {source.exists}")
-    console.print(f"Remote: {source.remote_url or source_url}")
-    console.print(f"Requested ref: {source.requested_ref or ref or 'not pinned'}")
-    console.print(f"Current commit: {source.current_commit or 'unknown'}")
-    console.print(f"Locked source: {lock.source_url}")
-    console.print(f"Locked ref: {lock.ref}")
-    console.print(f"Patch resource: {lock.patch_resource}")
-    if source.manifest_path:
-        console.print(f"Manifest: {source.manifest_path}")
-
-
-@main.command("plane-patch")
-@click.argument("action", type=click.Choice(["export", "apply"]))
-@click.option("--repo", type=click.Path(path_type=Path), default=Path.cwd())
-@click.option("--dir", "source_dir", type=click.Path(path_type=Path), default=None)
-@click.option("--patch", "patch_path", type=click.Path(path_type=Path), default=None)
-def plane_patch(action: str, repo: Path, source_dir: Path | None, patch_path: Path | None) -> None:
-    """Export or apply the tracked codex-fleet Plane customization patch."""
-    try:
-        if action == "export":
-            path = export_plane_customization_patch(
-                repo.expanduser().absolute(),
-                source_dir=source_dir,
-                patch_path=patch_path,
-            )
-            console.print(f"Exported Plane customization patch: {path}")
-            return
-        path = apply_plane_customization_patch(
-            repo.expanduser().absolute(),
-            source_dir=source_dir,
-            patch_path=patch_path,
-        )
-    except PlaneManagerError as exc:
-        raise click.ClickException(str(exc)) from exc
-    console.print(f"Applied Plane customization patch to: {path}")
-
-
 @main.command("plane-verify")
 @click.option("--repo", type=click.Path(path_type=Path), default=Path.cwd())
 @click.option("--dir", "source_dir", type=click.Path(path_type=Path), default=None)
 def plane_verify(repo: Path, source_dir: Path | None) -> None:
     """Verify local Plane source has codex-fleet customization hooks."""
-    report = verify_plane_customization(repo.expanduser().absolute(), source_dir)
+    repo = repo.expanduser().absolute()
+    try:
+        require_plane_source(repo, source_dir)
+    except PlaneManagerError as exc:
+        raise click.ClickException(str(exc)) from exc
+    report = verify_plane_customization(repo, source_dir)
     table = Table(title=f"Plane customization: {report.source_dir}")
     table.add_column("check")
     table.add_column("status")
@@ -702,13 +633,13 @@ def open_cmd(repo: Path, plane_url: str, project_path: Path | None, dashboard: b
     """Open the branded local Plane fork URL."""
     repo = repo.expanduser().absolute()
     if dashboard:
-        fragment = urlencode(
-            {
-                "apiUrl": f"http://{DEFAULT_LOCAL_API_HOST}:{DEFAULT_LOCAL_API_PORT}",
-                "token": load_or_create_local_api_token(repo),
-            }
+        api_url = f"http://{DEFAULT_LOCAL_API_HOST}:{DEFAULT_LOCAL_API_PORT}"
+        url = build_plane_login_url(
+            repo,
+            api_url=api_url,
+            plane_url=plane_url,
+            redirect_path="codex-fleet/projects/",
         )
-        url = f"{plane_url.rstrip('/')}/codex-fleet/projects/#{fragment}"
     else:
         url = build_onboarding_url(repo, plane_url=plane_url, project_path=project_path)
     console.print(url)
@@ -727,6 +658,7 @@ def daemon(repo: Path, fake: bool, fake_fail: bool, ticks: int | None, sleep_sec
     """Run the polling loop."""
     config = load_config(repo)
     _print_watch_banner(config, fake=fake, fake_fail=fake_fail)
+    _ensure_app_server_protocol_ready(fake=fake)
     stats = FleetDaemon(
         config,
         fake_runner=fake,
@@ -773,6 +705,17 @@ def up(repo: Path, fake: bool, fake_fail: bool, once: bool, sleep_seconds: float
             return
     else:
         config = load_config(repo)
+    if config.tracker.kind == "memory":
+        console.print("Configured memory tracker; bootstrapping local Plane for the full Codex Fleet product.")
+        try:
+            config = _bootstrap_default_local_plane_config(repo, DEFAULT_PLANE_URL)
+            plane_client = build_plane_client(config)
+        except (PlaneManagerError, PlaneLocalBootstrapError, ValueError) as exc:
+            console.print(f"Local Plane could not be prepared automatically: {exc}")
+            console.print(
+                "Plane UI actions are not connected because this repo is still using the memory tracker. "
+                "Run `make plane-up` and `python -m codex_fleet plane-local-bootstrap --repo .` to configure Plane."
+            )
     if config.tracker.kind == "plane":
         plane_url = config.tracker.plane_base_url or DEFAULT_PLANE_URL
         try:
@@ -854,8 +797,14 @@ def up(repo: Path, fake: bool, fake_fail: bool, once: bool, sleep_seconds: float
     report = scan_repo(config.repo, codex_command=config.codex.command)
     console.print(render_report(report))
     console.print(f"Tracker: {config.tracker.kind}")
+    if config.tracker.kind == "memory":
+        console.print(
+            "Plane UI actions are not connected because this repo is using the memory tracker. "
+            "Run plane-local-bootstrap or plane-configure to use the Plane board."
+        )
     console.print(f"Workspace root: {config.workspace.root}")
     _print_watch_banner(config, fake=fake, fake_fail=fake_fail)
+    _ensure_app_server_protocol_ready(fake=fake)
     max_ticks = 1 if once else None
     api_server: LocalApiServer | None = None
     if config.tracker.kind == "plane" and _is_loopback_url(config.tracker.plane_base_url or "") and not once:
@@ -864,7 +813,8 @@ def up(repo: Path, fake: bool, fake_fail: bool, once: bool, sleep_seconds: float
         api_thread = threading.Thread(target=api_server.serve_forever, daemon=True)
         api_thread.start()
         console.print(f"codex-fleet API: {api_url}")
-        console.print("Plane run controls can use the local API token from .codex-fleet/secrets/local_api_token.")
+        console.print("Connected Plane session: local API handoff will be opened automatically.")
+        console.print("Logs: terminal output is live; use `make up 2>&1 | tee /tmp/codex-fleet-up.log` to save it.")
         board_path = _plane_board_path(config)
         if board_path:
             board_url = f"{(config.tracker.plane_base_url or DEFAULT_PLANE_URL).rstrip('/')}/{board_path.lstrip('/')}"
@@ -915,7 +865,10 @@ def down(repo: Path, preview_port: int, api_port: int, plane: bool, ports: bool)
     if ports:
         results.extend(stop_loopback_ports(_runtime_ports(runtime, defaults=[api_port, preview_port])))
     if plane:
-        results.append(stop_plane_runtime(repo))
+        plane_result = stop_plane_runtime(repo)
+        results.append(plane_result)
+        if not plane_result.stopped:
+            results.append(stop_plane_app_containers())
     for result in results:
         status = "stopped" if result.stopped else "skip"
         console.print(f"{status.upper()} {result.target}: {result.message}")
@@ -955,17 +908,17 @@ def _serve_plane_fork_onboarding(
     unsafe_allow_remote: bool,
     once: bool,
 ) -> None:
-    source_dir = repo / ".codex-fleet" / "plane-src"
+    source_dir = repo / "apps" / "plane"
     build_dir = source_dir / "apps" / "web" / "build" / "client"
     if not (build_dir / "index.html").exists():
-        if not (source_dir / ".git").exists():
+        if not (source_dir / "apps" / "web").exists():
             console.print(
-                "Preparing branded Plane fork: cloning pinned Plane source. "
+                "Preparing branded Plane source: cloning pinned Plane source. "
                 "This can take a few minutes on first run."
             )
         else:
             console.print(
-                "Preparing branded Plane fork: installing web dependencies and building Plane UI."
+                "Preparing branded Plane source: installing web dependencies and building Plane UI."
             )
     try:
         api_server, api_url = _create_local_api_server_with_fallback(repo, host=host)
@@ -1048,10 +1001,41 @@ def _plane_board_path(config: FleetConfig) -> str | None:
 
 
 def _ensure_plane_frontend_build(repo: Path) -> Path:
+    try:
+        require_plane_source(repo)
+    except PlaneManagerError as exc:
+        raise PlanePreviewError(str(exc)) from exc
     build_dir = default_plane_build_dir(repo)
-    if (build_dir / "index.html").exists():
+    if (build_dir / "index.html").exists() and not _plane_frontend_build_is_stale(repo, build_dir):
         return build_dir
     return prepare_plane_preview_build(repo)
+
+
+def _plane_frontend_build_is_stale(repo: Path, build_dir: Path) -> bool:
+    source_root = repo.expanduser().absolute() / "apps" / "plane" / "apps" / "web"
+    stamp = build_dir / "index.html"
+    if not stamp.exists():
+        return True
+    build_mtime = stamp.stat().st_mtime
+    watched_paths = [
+        source_root / "app" / "codex-fleet",
+        source_root / "app" / "(all)" / "[workspaceSlug]" / "(projects)" / "projects" / "(detail)" / "[projectId]" / "fleet-logs",
+        source_root / "app" / "(all)" / "[workspaceSlug]" / "(projects)" / "projects" / "(detail)" / "[projectId]" / "agents",
+        source_root / "app" / "(all)" / "[workspaceSlug]" / "(projects)" / "projects" / "(detail)" / "[projectId]" / "runs",
+        source_root / "app" / "(all)" / "[workspaceSlug]" / "(projects)" / "projects" / "(detail)" / "[projectId]" / "artifacts",
+        source_root / "app" / "(all)" / "[workspaceSlug]" / "(projects)" / "projects" / "(detail)" / "[projectId]" / "codex-settings",
+        source_root / "ce" / "components" / "projects" / "create",
+        source_root / "core" / "components" / "issues" / "issue-modal",
+        source_root / "components" / "codex-fleet",
+    ]
+    for path in watched_paths:
+        if path.is_file() and path.stat().st_mtime > build_mtime:
+            return True
+        if path.is_dir():
+            for child in path.rglob("*"):
+                if child.is_file() and child.suffix in {".ts", ".tsx", ".css", ".js", ".jsx"} and child.stat().st_mtime > build_mtime:
+                    return True
+    return False
 
 
 def _is_loopback_url(url: str) -> bool:
@@ -1066,12 +1050,23 @@ def _loopback_host_for_url(url: str) -> str:
 
 def _print_watch_banner(config: FleetConfig, *, fake: bool, fake_fail: bool) -> None:
     active = ", ".join(config.tracker.active_states)
-    runner = "fake runner" if fake else "Codex runner"
+    runner = "fake runner" if fake else "Codex App Server runner"
     if fake and fake_fail:
         runner = "fake failing runner"
     console.print(f"Watching Plane states: {active}")
-    console.print("Move work items to Ready to run them. Running/In Progress is treated as already claimed.")
+    console.print("Move work items to Ready to run them. Running is treated as already claimed.")
     console.print(f"Runner: {runner}")
+
+
+def _ensure_app_server_protocol_ready(*, fake: bool) -> None:
+    if fake:
+        return
+    try:
+        validate_app_server_turn_start_shape()
+    except ProtocolError as exc:
+        raise click.ClickException(
+            f"Codex Fleet App Server protocol check failed: {exc}. Restart with `make stop && make up` after updating."
+        ) from exc
 
 
 def _daemon_tick_logger(tick_number: int, tick_results: list[ProjectDaemonTick]) -> None:

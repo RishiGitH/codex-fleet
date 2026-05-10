@@ -1,146 +1,92 @@
 # Agent orchestration
 
-codex-fleet follows a Symphony-style orchestration model: the tracker is the control plane, each eligible work item becomes a run, the run happens in an isolated workspace, and humans review the result.
+codex-fleet uses Plane as the visible control plane. Humans create top-level work in Plane, and the daemon turns durable agent assignments into Plane child tasks so the task graph stays inspectable.
 
-## Modes
+## Workflow Modes
 
-codex-fleet supports three automation modes:
+- `execute_only`: create one implementer child task and run that child. The parent moves to Human Review after the required child succeeds.
+- `plan_only`: run a planner child task, create child tasks in Backlog/Todo, and leave the parent in Planning.
+- `plan_execute`: run a planner child task, create eligible child tasks, auto-run within depth and parallel limits, and move the parent to Human Review.
+- `full_auto`: run planner, scout/implementer/reviewer children, move the parent to Done when required children pass, and create a delivery task.
 
-- `manual`: agents may finish the current task, but follow-up tasks are only listed in comments.
-- `assisted`: agent-proposed tasks are created in Backlog for human review.
-- `full_agent`: agent-proposed child tasks are created in Ready until depth/count limits are reached.
+Only `full_auto` can move a parent to Done automatically. No mode pushes, merges, deploys, or opens a pull request by default.
 
-Plane child tasks are the durable visible work log. Codex-native subagents may still be used inside a run later, but they do not replace Plane tasks as the source of truth.
+## Task Graph
 
-## State ownership
+Every durable subagent assignment becomes a Plane child task:
 
-Plane users and Plane UI can create tasks, edit tasks, move tasks to Ready, and request a run.
+- planner
+- code scout
+- implementer
+- harness reviewer
+- security reviewer
+- token reviewer
+- delivery manager
 
-codex-fleet owns deterministic run state:
+`task_metadata` stores the local graph: parent/root ids, depth, dependencies, role, workflow mode, model/settings, delivery status, and terminal outcome. Plane comments stay concise; raw logs and large evidence stay in local artifacts.
+
+## Planner Contract
+
+Planner output is structured JSON only. The Codex CLI runner parses one fenced `codex-fleet-planner-output` block:
+
+````text
+```codex-fleet-planner-output
+{
+  "summary": "Split implementation and review.",
+  "tasks": [
+    {
+      "title": "Add regression coverage",
+      "description": "Cover the new state transition.",
+      "role": "implementer",
+      "priority": "high",
+      "depends_on": [],
+      "workflow_mode": "execute_only"
+    }
+  ],
+  "reviewers": ["harness_reviewer"]
+}
+```
+````
+
+Invalid planner output creates a blocker and moves the task to Rework/Needs Input. Planners do not edit files. Implementers work only on assigned tasks. Reviewers report findings only. Delivery managers prepare instructions only.
+
+## State Ownership
+
+Plane users and Plane UI can create tasks, edit tasks, move tasks to Ready, and request a run. codex-fleet owns deterministic run state:
 
 ```text
-Ready
-  -> claimed
-  -> Running
-  -> isolated worktree
-  -> Codex runner
-  -> collecting evidence
-  -> Needs Input when user input blocks progress
-  -> Human Review on success
-  -> Rework on failure
-  -> Blocked on local setup/auth/config failures
+Ready -> Running -> isolated worktree -> Codex runner -> evidence collection
 ```
 
-Agents can produce code, summaries, logs, and verification output. They do not decide whether a run is complete.
+Successful child work moves to Human Review. Failed work moves to Rework. Local setup/auth/config failures move to Blocked. User questions move to Needs Input.
 
-Agents can propose follow-up Plane tasks, but those proposals must be structured.
-A runner may return proposed tasks directly, and the Codex CLI runner also
-parses this fenced block from successful output:
+Planning parents are reconciled before dispatch:
 
-````text
-```codex-fleet-proposed-tasks
-[
-  {
-    "title": "Add regression coverage",
-    "description": "Cover the new state transition.",
-    "role": "worker",
-    "depends_on": [],
-    "suggested_state": "Ready"
-  }
-]
-```
-````
+- all required children passed: parent moves to Human Review, or Done in `full_auto`
+- any required child failed/cancelled/needs input: parent moves to Blocked with a clear comment
+- children still active: parent stays Planning
 
-codex-fleet decides the final state from the project mode. In `assisted`, child
-tasks are Backlog. In `full_agent`, child tasks are Ready until `max_task_depth`
-and `max_child_tasks_per_run` are reached.
+Max depth and max parallel agents are enforced by daemon code, not only prompt text.
 
-When a `full_agent` lead creates child tasks, the parent moves to Planning. The
-daemon reconciles Planning parents before dispatch:
+## Evidence
 
-- if every child is `Human Review` or `Done`, the parent moves to `Human Review`
-- if any child is `Needs Input`, `Rework`, `Blocked`, or `Cancelled`, the parent stays `Planning` and receives one blocker comment
-- if any child is still `Ready`, `Running`, or `Planning`, the parent stays `Planning` quietly
+Each run records local evidence in SQLite:
 
-The daemon never moves a parent to Done automatically. A configured terminal
-state such as `Cancelled` is not treated as a successful child outcome.
+- `runs`: status, branch, worktree, runner, agent identity, model/settings, token usage when available, and error
+- `events`: append-only orchestration milestones
+- `artifacts`: local file evidence with path, kind, size, SHA-256 when available, and redaction class
+- `claims`: duplicate-dispatch prevention
+- `task_metadata`: Plane-visible task graph
 
-If Codex needs human input, it emits:
-
-````text
-```codex-fleet-needs-input
-{"question": "Which deployment target should I use?"}
-```
-````
-
-codex-fleet comments the question and moves the task to `Needs Input`.
-
-Each run has durable local evidence in SQLite:
-
-- `runs` stores current status, branch, worktree, runner, agent identity, model/settings metadata, token usage when available, and error.
-- `events` stores append-only orchestration milestones.
-- `artifacts` stores typed local file evidence emitted by runners, including path, kind, size, SHA-256 when available, and redaction class.
-- `claims` prevents duplicate dispatch and records active, completed, failed, or stale ownership.
-- `task_metadata` stores the Plane-visible task graph: parent, root, depth, role, dependencies, approval mode, and inherited settings.
-
-Plane comments stay concise and human-readable. Raw run material belongs in artifacts so future agents can inspect evidence without pasting large logs into prompts.
-
-## Stale Claim Recovery
-
-The daemon reconciles stale active claims before dispatching work. The claim TTL is based on the longer of the Codex turn timeout and stall timeout, because a real Codex turn may legitimately run longer than the polling interval.
-
-When a stale claim is found:
-
-- codex-fleet marks the claim `stale`
-- codex-fleet records a `stale_claim_released` event
-- active local run status becomes `stalled`
-- if the Plane work item is still Ready, it can be claimed again
-- if the Plane work item is Running, codex-fleet comments and moves it to Rework
-
-This keeps interrupted daemon runs from permanently stranding Ready or Running work.
+Token usage is shown only when reliable. Missing usage is reported as unavailable, never fabricated.
 
 ## Operator Controls
 
-The local API exposes structured retry and cancel actions for the Plane UI.
+Retry releases the latest claim, records a retry event, comments in Plane, and moves the item back to Ready. Cancel records cancellation events, marks the latest run cancelled, releases the claim, comments in Plane, and moves the item to Cancelled.
 
-- Retry releases the latest claim, records a `retry_requested` event, comments in Plane, and moves the item back to Ready.
-- Cancel records `cancel_requested`, marks the latest run cancelled, releases the claim, comments in Plane, and moves the item to Cancelled.
+## Safety
 
-These controls update codex-fleet state and Plane state. V2 cancellation is a
-control-plane cancellation; it does not yet guarantee process termination for an
-already-running Codex subprocess unless the runner adds process-handle tracking.
-
-## Agent Visibility
-
-Every run should expose enough metadata for the user to see which "employee"
-handled it:
-
-- agent role/name/avatar
-- model and reasoning/sandbox/approval settings
-- token usage when the runner reports it
-- branch and workspace path
-- ordered event timeline
-- artifacts
-
-Plane comments remain concise. The run panel and Fleet Logs view should use the
-local run store for detailed evidence.
-
-## Future specialist agents
-
-Specialist agents can be added as bounded substeps after the core loop is reliable:
-
-- code scout before implementation
-- harness reviewer after harness changes
-- security reviewer for local API, Docker, tokens, and shell boundaries
-- token reviewer for prompts, docs, and logs
-
-These should feed evidence into the run record and Plane comments. They should not replace the daemon's state machine.
-
-## Default safety
-
-- no auto-merge
-- no deploy
-- no broad filesystem writes
-- no arbitrary shell endpoint from Plane
-- human review before Done
-- raw logs stored as local artifacts, concise summaries posted to Plane
+- Plane web never shells out or starts Codex directly.
+- codex-fleet never broad-mounts the filesystem by default.
+- codex-fleet does not auto-merge, deploy, push, or create PRs.
+- GitHub is optional; delivery tasks include local merge instructions when no remote exists.

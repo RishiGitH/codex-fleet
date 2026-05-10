@@ -226,8 +226,11 @@ class FakePlaneApi:
             {"id": "backlog-id", "name": "Backlog"},
             {"id": "ready-id", "name": "Ready"},
             {"id": "running-id", "name": "Running"},
+            {"id": "planning-id", "name": "Planning"},
+            {"id": "needs-input-id", "name": "Needs Input"},
             {"id": "human-review-id", "name": "Human Review"},
             {"id": "rework-id", "name": "Rework"},
+            {"id": "blocked-id", "name": "Blocked"},
         ]
         self.items: list[dict[str, object]] = [
             {
@@ -333,9 +336,9 @@ def test_plane_tracker_orchestrator_failure_posts_status_and_rework(tmp_path) ->
     ).run_once()
 
     assert result.dispatched is True
-    assert api.transitions == ["Running", "Rework"]
-    assert api.items[0]["state_detail"] == {"name": "Rework"}
-    assert "codex-fleet run failed" in "\n".join(comment for _, comment in api.comments)
+    assert api.transitions == ["Running", "Needs Input"]
+    assert api.items[0]["state_detail"] == {"name": "Needs Input"}
+    assert "requires rework" in "\n".join(comment for _, comment in api.comments)
 
 
 def test_plane_tracker_creates_agent_proposed_follow_up_item(tmp_path) -> None:
@@ -355,8 +358,8 @@ def test_plane_tracker_creates_agent_proposed_follow_up_item(tmp_path) -> None:
 
     assert result.dispatched is True
     assert api.items[1]["name"] == "Follow up in Plane"
-    assert api.items[1]["state_detail"] == {"name": "Backlog"}
-    assert api.items[1]["label_details"] == [{"name": "agent-proposed"}]
+    assert api.items[1]["state_detail"] == {"name": "Ready"}
+    assert api.items[1]["label_details"] == [{"name": "agent-followup"}]
     comments = "\n".join(comment for _, comment in api.comments)
     assert "Agent-proposed follow-up tasks" in comments
     assert "proposed this follow-up" in comments

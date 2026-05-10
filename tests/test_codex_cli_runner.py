@@ -121,7 +121,7 @@ def test_parse_proposed_tasks_from_codex_output() -> None:
     assert tasks[0].labels == ("agent-proposed",)
 
 
-def test_parse_proposed_tasks_supports_full_agent_metadata() -> None:
+def test_parse_proposed_tasks_supports_canonical_child_metadata() -> None:
     output = """done
 ```codex-fleet-proposed-tasks
 [

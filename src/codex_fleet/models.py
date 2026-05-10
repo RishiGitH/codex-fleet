@@ -71,10 +71,30 @@ class WorkItem:
 
 
 @dataclass(frozen=True)
+class WorkItemComment:
+    id: str
+    author_display_name: str
+    created_at: datetime | None
+    body_text: str
+    is_codex_fleet: bool = False
+
+
+@dataclass(frozen=True)
 class TokenUsage:
     input_tokens: int | None = None
     output_tokens: int | None = None
     total_tokens: int | None = None
+
+
+@dataclass(frozen=True)
+class RunMessage:
+    sequence: int
+    kind: str
+    content: str
+    agent_role: str | None = None
+    agent_name: str | None = None
+    artifact_path: Path | None = None
+    payload: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -87,6 +107,9 @@ class RunResult:
     proposed_tasks: tuple[ProposedTask, ...] = ()
     needs_input: NeedsInput | None = None
     token_usage: TokenUsage | None = None
+    messages: tuple[RunMessage, ...] = ()
+    codex_thread_id: str | None = None
+    codex_turn_id: str | None = None
     error: str | None = None
 
 
@@ -121,6 +144,7 @@ class RunRecord:
     agent_name: str | None = None
     agent_avatar: str | None = None
     model: str | None = None
+    reasoning_effort: str | None = None
     settings: dict[str, Any] = field(default_factory=dict)
     token_usage: TokenUsage | None = None
     attempts: int = 0

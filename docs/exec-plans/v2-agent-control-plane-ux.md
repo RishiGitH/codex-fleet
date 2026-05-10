@@ -116,7 +116,7 @@ Every run payload must expose:
 - `reasoning_effort`
 - `approval_policy`
 - `sandbox_mode`
-- `automation_mode`
+- `workflow_mode`
 - `total_tokens` when reliably available
 
 Default identity mapping:
@@ -277,14 +277,14 @@ Replace raw controls:
 - `never` -> `Auto local edits`
 - `untrusted` -> `Untrusted sandbox`
 - `Follow-up tasks` -> remove from onboarding
-- `Automation mode` -> show Manual, Assisted, Full Agent
+- `Automation mode` -> show Execute only, Plan only, Plan and execute, Full auto
 
 Default values:
 
-- `automation_mode=assisted`
+- `workflow_mode=plan_execute`
 - `approval_policy=never`
 - `sandbox_mode=workspace-write`
-- `max_task_depth=2`
+- `max_depth=2`
 - `max_child_tasks_per_run=8`
 - `max_total_agent_created_tasks_per_parent=20`
 

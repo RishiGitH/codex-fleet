@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from codex_fleet.local_api import DEFAULT_LOCAL_API_HOST
-from codex_fleet.plane_manager import PLANE_SOURCE_DIR, PlaneManagerError, ensure_plane_source
+from codex_fleet.plane_manager import PLANE_SOURCE_DIR, PlaneManagerError, require_plane_source
 
 
 class PlanePreviewError(RuntimeError):
@@ -35,6 +35,10 @@ def create_plane_preview_server(
 ) -> PlanePreviewServer:
     if not unsafe_allow_remote and host not in {"127.0.0.1", "localhost", "::1"}:
         raise PlanePreviewError("Plane preview must bind to loopback unless explicitly unsafe.")
+    try:
+        require_plane_source(repo)
+    except PlaneManagerError as exc:
+        raise PlanePreviewError(str(exc)) from exc
     static_dir = default_plane_build_dir(repo)
     if not (static_dir / "index.html").exists():
         if not auto_prepare:
@@ -57,7 +61,7 @@ def create_plane_preview_server(
 def prepare_plane_preview_build(repo: Path) -> Path:
     repo = repo.expanduser().absolute()
     try:
-        source = ensure_plane_source(repo)
+        source = require_plane_source(repo)
     except PlaneManagerError as exc:
         raise PlanePreviewError(str(exc)) from exc
     _require_pnpm()

@@ -139,6 +139,38 @@ def stop_plane_runtime(repo: Path) -> StopResult:
     return StopResult(target=str(install.app_dir), stopped=True, message="Stopped local Plane Docker Compose runtime.")
 
 
+def stop_plane_app_containers() -> StopResult:
+    """Fallback for older local Plane installs that lack runtime metadata."""
+    if shutil.which("docker") is None:
+        return StopResult(target="plane-app containers", stopped=False, message="Docker is not available.")
+    result = subprocess.run(
+        ["docker", "ps", "--format", "{{.Names}}"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip() or "docker ps failed"
+        return StopResult(target="plane-app containers", stopped=False, message=message)
+    names = sorted(name for name in result.stdout.splitlines() if name.startswith("plane-app-"))
+    if not names:
+        return StopResult(target="plane-app containers", stopped=False, message="No running plane-app-* containers found.")
+    stop_result = subprocess.run(
+        ["docker", "stop", *names],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if stop_result.returncode != 0:
+        message = stop_result.stderr.strip() or stop_result.stdout.strip() or "docker stop failed"
+        return StopResult(target="plane-app containers", stopped=False, message=message)
+    return StopResult(
+        target="plane-app containers",
+        stopped=True,
+        message=f"Stopped {len(names)} running plane-app-* container(s).",
+    )
+
+
 def _process_exists(pid: int) -> bool:
     try:
         os.kill(pid, 0)

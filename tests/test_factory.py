@@ -4,7 +4,7 @@ import pytest
 
 from codex_fleet.config import CodexConfig, FleetConfig, TrackerConfig
 from codex_fleet.factory import build_runner, build_tracker, default_store_path
-from codex_fleet.runner import CodexAppServerRunner, CodexCliRunner, FakeRunner
+from codex_fleet.runner import CodexAppServerRunner, FakeRunner
 from codex_fleet.tracker import MemoryTracker
 
 
@@ -22,19 +22,28 @@ def test_build_plane_tracker_requires_settings() -> None:
         build_tracker(config)
 
 
-def test_build_runner_selects_fake_or_codex() -> None:
+def test_build_runner_selects_fake_or_app_server() -> None:
     config = FleetConfig()
 
     assert isinstance(build_runner(config, fake=True), FakeRunner)
     runner = build_runner(config, fake=False)
-    assert isinstance(runner, CodexCliRunner)
-    assert runner.stream_logs is True
+    assert isinstance(runner, CodexAppServerRunner)
+    assert runner.command == "codex app-server"
 
 
 def test_build_runner_preserves_app_server_mode() -> None:
     config = FleetConfig(codex=CodexConfig(runner="app-server", command="codex app-server"))
 
     assert isinstance(build_runner(config, fake=False), CodexAppServerRunner)
+
+
+def test_build_runner_passes_agent_role_to_app_server() -> None:
+    config = FleetConfig(codex=CodexConfig(runner="app-server", command="codex app-server"))
+
+    runner = build_runner(config, fake=False, agent_role="planner")
+
+    assert isinstance(runner, CodexAppServerRunner)
+    assert runner.agent_role == "planner"
 
 
 def test_build_runner_can_force_fake_failure() -> None:

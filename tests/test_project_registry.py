@@ -17,7 +17,7 @@ def test_project_registry_adds_and_lists_folder(tmp_path: Path) -> None:
     assert project.slug == "my-app"
     assert project.repo_path == project_dir.resolve()
     assert project.git_root is None
-    assert project.runner_mode == "codex"
+    assert project.runner_mode == "app-server"
     assert registry.list_projects() == [project]
 
 
@@ -60,7 +60,7 @@ def test_project_registry_generates_unique_slugs_for_same_named_projects(tmp_pat
     assert [project.slug for project in registry.list_projects()] == ["app", "app-2"]
 
 
-def test_project_registry_migrates_fake_runner_mode_to_codex(tmp_path: Path) -> None:
+def test_project_registry_migrates_legacy_runner_mode_to_app_server(tmp_path: Path) -> None:
     project_dir = tmp_path / "app"
     project_dir.mkdir()
     db_path = tmp_path / "projects.sqlite3"
@@ -72,7 +72,7 @@ def test_project_registry_migrates_fake_runner_mode_to_codex(tmp_path: Path) -> 
     migrated = ProjectRegistry(db_path).get_project(project.id)
 
     assert migrated is not None
-    assert migrated.runner_mode == "codex"
+    assert migrated.runner_mode == "app-server"
 
 
 def test_project_registry_persists_codex_settings(tmp_path: Path) -> None:
@@ -82,26 +82,108 @@ def test_project_registry_persists_codex_settings(tmp_path: Path) -> None:
     project = registry.add_project(
         project_dir,
         codex_settings={
-            "default_model": "gpt-5.4-mini",
-            "reasoning_effort": "high",
-            "automation_mode": "full_agent",
-            "max_parallel_agents": 5,
-        },
+                "default_model": "gpt-5.4-mini",
+                "reasoning_effort": "high",
+                "workflow_mode": "full_auto",
+                "max_parallel_agents": 5,
+            },
     )
 
     assert project.codex_settings["default_model"] == "gpt-5.4-mini"
     assert project.codex_settings["reasoning_effort"] == "high"
-    assert project.codex_settings["automation_mode"] == "full_agent"
-    assert project.codex_settings["agent_task_mode"] == "agent_task_planner"
+    assert project.codex_settings["workflow_mode"] == "full_auto"
     assert project.codex_settings["max_parallel_agents"] == 5
     assert project.codex_settings["max_child_tasks_per_run"] == 8
     assert project.codex_settings["skill_policy"] == "minimal"
     assert project.codex_settings["subagents"]["implementer"]["model"] == "gpt-5.5"
 
-    updated = registry.update_project_settings(project.id, {"default_model": "gpt-5.5", "max_task_depth": 2})
+    updated = registry.update_project_settings(project.id, {"default_model": "gpt-5.5", "max_depth": 2})
 
     assert updated.codex_settings["default_model"] == "gpt-5.5"
-    assert updated.codex_settings["max_task_depth"] == 2
+    assert updated.codex_settings["max_depth"] == 2
+
+
+def test_role_overrides_are_explicit_not_hidden_subagent_defaults(tmp_path: Path) -> None:
+    from codex_fleet.execution_settings import merged_work_item_settings
+    from codex_fleet.models import WorkItem
+
+    item = WorkItem(
+        id="1",
+        identifier="CF-1",
+        title="Plan",
+        description=None,
+        state="Ready",
+        labels=("agent-planner",),
+    )
+    settings = merged_work_item_settings(
+        {
+            "default_model": "gpt-5.5",
+            "reasoning_effort": "low",
+            "subagents": {"code_scout": {"model": "gpt-5.4-mini", "reasoning_effort": "medium"}},
+        },
+        item,
+    )
+
+    assert settings["agent_role"] == "planner"
+    assert settings["default_model"] == "gpt-5.5"
+    assert settings["reasoning_effort"] == "low"
+
+
+def test_enabled_agent_profiles_override_project_defaults(tmp_path: Path) -> None:
+    from codex_fleet.execution_settings import merged_work_item_settings
+    from codex_fleet.models import WorkItem
+
+    item = WorkItem(
+        id="1",
+        identifier="CF-1",
+        title="Plan",
+        description=None,
+        state="Ready",
+        labels=("agent-planner",),
+    )
+
+    settings = merged_work_item_settings(
+        {
+            "subagents_enabled": True,
+            "default_model": "gpt-5.5",
+            "reasoning_effort": "low",
+        },
+        item,
+    )
+
+    assert settings["agent_role"] == "planner"
+    assert settings["default_model"] == "gpt-5.5"
+    assert settings["reasoning_effort"] == "medium"
+    assert settings["settings_source"] == "role_override"
+
+
+def test_legacy_reviewer_profiles_normalize_to_quality_reviewer() -> None:
+    from codex_fleet.execution_settings import merged_work_item_settings
+    from codex_fleet.models import WorkItem
+
+    item = WorkItem(
+        id="1",
+        identifier="CF-1",
+        title="Review",
+        description=None,
+        state="Ready",
+        labels=("agent-token-reviewer",),
+    )
+
+    settings = merged_work_item_settings({"subagents_enabled": True}, item)
+
+    assert settings["agent_role"] == "quality_reviewer"
+    assert settings["default_model"] == "gpt-5.4-mini"
+    assert settings["reasoning_effort"] == "high"
+
+
+def test_project_registry_rejects_legacy_settings(tmp_path: Path) -> None:
+    project_dir = tmp_path / "app"
+    project_dir.mkdir()
+    registry = ProjectRegistry(tmp_path / "projects.sqlite3")
+
+    with pytest.raises(ProjectRegistryError, match="Legacy Codex Fleet settings"):
+        registry.add_project(project_dir, codex_settings={"agent_task_mode": "agent_task_planner"})
 
 
 def test_project_registry_rejects_missing_folder(tmp_path: Path) -> None:

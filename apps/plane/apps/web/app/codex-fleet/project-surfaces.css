@@ -1,0 +1,636 @@
+.cf-cockpit {
+  --cf-bg: oklch(15% 0.008 245);
+  --cf-panel: oklch(19% 0.01 245);
+  --cf-panel-raised: oklch(23% 0.012 245);
+  --cf-border: oklch(35% 0.014 245);
+  --cf-text: oklch(92% 0.008 245);
+  --cf-muted: oklch(68% 0.01 245);
+  --cf-faint: oklch(52% 0.012 245);
+  --cf-blue: oklch(68% 0.14 245);
+  --cf-cyan: oklch(74% 0.12 205);
+  --cf-purple: oklch(72% 0.14 305);
+  --cf-green: oklch(72% 0.13 150);
+  --cf-amber: oklch(78% 0.14 75);
+  --cf-red: oklch(68% 0.16 28);
+  --cf-pink: oklch(72% 0.15 350);
+  --cf-slate: oklch(75% 0.04 245);
+  background:
+    linear-gradient(180deg, oklch(18% 0.01 245), var(--cf-bg) 240px),
+    var(--cf-bg);
+  color: var(--cf-text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+}
+
+.cf-shell {
+  margin: 0 auto;
+  display: grid;
+  max-width: 1360px;
+  gap: 18px;
+  padding: 22px 28px 48px;
+}
+
+.cf-topbar {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) auto minmax(220px, auto);
+  align-items: center;
+  gap: 18px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--cf-border);
+}
+
+.cf-title-lockup,
+.cf-actions,
+.cf-inline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.cf-surface-icon {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border: 1px solid var(--cf-border);
+  border-radius: 8px;
+  background: var(--cf-panel-raised);
+  color: var(--cf-muted);
+}
+
+.cf-title {
+  margin: 0;
+  color: var(--cf-text);
+  font-size: 18px;
+  font-weight: 720;
+  letter-spacing: 0;
+}
+
+.cf-subtitle,
+.cf-diagnostics,
+.cf-mini,
+.cf-muted {
+  color: var(--cf-muted);
+}
+
+.cf-subtitle {
+  margin-top: 2px;
+  font-size: 12px;
+}
+
+.cf-diagnostics {
+  justify-self: center;
+  font-size: 11px;
+}
+
+.cf-icon-button,
+.cf-button,
+.cf-button-secondary {
+  min-height: 36px;
+  border-radius: 8px;
+  border: 1px solid var(--cf-border);
+  padding: 0 12px;
+  color: var(--cf-text);
+  background: var(--cf-panel-raised);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.cf-icon-button {
+  display: inline-grid;
+  width: 36px;
+  padding: 0;
+  place-items: center;
+}
+
+.cf-button {
+  background: color-mix(in oklch, var(--cf-blue), var(--cf-panel-raised) 68%);
+  border-color: color-mix(in oklch, var(--cf-blue), var(--cf-border) 45%);
+}
+
+.cf-button:disabled,
+.cf-icon-button:disabled,
+.cf-button-secondary:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.cf-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  border: 1px solid color-mix(in oklch, var(--tone), var(--cf-border) 55%);
+  border-radius: 8px;
+  background: color-mix(in oklch, var(--tone), transparent 88%);
+  color: color-mix(in oklch, var(--tone), var(--cf-text) 26%);
+  padding: 10px 12px;
+  font-size: 13px;
+}
+
+.cf-banner-good {
+  --tone: var(--cf-green);
+}
+
+.cf-banner-warn {
+  --tone: var(--cf-amber);
+}
+
+.cf-banner-bad {
+  --tone: var(--cf-red);
+}
+
+.cf-panel {
+  border: 1px solid var(--cf-border);
+  border-radius: 8px;
+  background: var(--cf-panel);
+}
+
+.cf-panel-pad {
+  padding: 16px;
+}
+
+.cf-hero {
+  display: grid;
+  grid-template-columns: minmax(300px, 1fr) minmax(360px, 0.95fr);
+  gap: 18px;
+  padding: 18px;
+  border: 1px solid var(--cf-border);
+  border-radius: 8px;
+  background: var(--cf-panel);
+}
+
+.cf-project-kicker,
+.cf-label {
+  color: var(--cf-faint);
+  font-size: 11px;
+  font-weight: 720;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.cf-project-name {
+  margin: 5px 0 0;
+  color: var(--cf-text);
+  font-size: 22px;
+  font-weight: 760;
+  letter-spacing: 0;
+}
+
+.cf-path {
+  margin-top: 6px;
+  max-width: 72ch;
+  overflow: hidden;
+  color: var(--cf-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cf-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.cf-summary-item,
+.cf-health-tile {
+  border: 1px solid var(--cf-border);
+  border-radius: 8px;
+  background: var(--cf-panel-raised);
+  padding: 11px;
+}
+
+.cf-summary-value {
+  margin-top: 5px;
+  color: var(--cf-text);
+  font-size: 14px;
+  font-weight: 720;
+}
+
+.cf-state-card {
+  display: grid;
+  align-content: space-between;
+  min-height: 178px;
+  border: 1px solid color-mix(in oklch, var(--state-tone), var(--cf-border) 42%);
+  border-radius: 8px;
+  background: color-mix(in oklch, var(--state-tone), var(--cf-panel-raised) 90%);
+  padding: 16px;
+}
+
+.cf-state-good {
+  --state-tone: var(--cf-green);
+}
+
+.cf-state-warn {
+  --state-tone: var(--cf-amber);
+}
+
+.cf-state-bad {
+  --state-tone: var(--cf-red);
+}
+
+.cf-state-info {
+  --state-tone: var(--cf-blue);
+}
+
+.cf-state-title {
+  margin: 8px 0 0;
+  color: var(--cf-text);
+  font-size: 25px;
+  font-weight: 780;
+  letter-spacing: 0;
+}
+
+.cf-next-action {
+  margin-top: 10px;
+  color: color-mix(in oklch, var(--state-tone), var(--cf-text) 32%);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.cf-two-column {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(360px, 0.9fr);
+  gap: 18px;
+}
+
+.cf-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 12px;
+}
+
+.cf-section-title {
+  margin: 0;
+  color: var(--cf-text);
+  font-size: 14px;
+  font-weight: 740;
+}
+
+.cf-flow {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(210px, 1fr));
+  gap: 12px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.cf-lane {
+  min-width: 210px;
+}
+
+.cf-lane-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 9px;
+  color: var(--cf-muted);
+  font-size: 12px;
+  font-weight: 720;
+}
+
+.cf-node {
+  border: 1px solid color-mix(in oklch, var(--role-color), var(--cf-border) 60%);
+  border-radius: 8px;
+  background: color-mix(in oklch, var(--role-color), var(--cf-panel-raised) 93%);
+  padding: 12px;
+}
+
+.cf-node + .cf-node {
+  margin-top: 9px;
+}
+
+.cf-node-key,
+.cf-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.cf-node-key {
+  color: var(--cf-text);
+  font-size: 14px;
+  font-weight: 760;
+}
+
+.cf-node-meta {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+  color: var(--cf-muted);
+  font-size: 12px;
+}
+
+.cf-timeline {
+  position: relative;
+  display: grid;
+  gap: 10px;
+}
+
+.cf-event {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  border: 1px solid var(--cf-border);
+  border-radius: 8px;
+  background: var(--cf-panel-raised);
+  padding: 11px;
+}
+
+.cf-event .cf-inline {
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+
+.cf-role-dot {
+  width: 10px;
+  height: 10px;
+  margin-top: 5px;
+  border-radius: 999px;
+  background: var(--role-color);
+  box-shadow: 0 0 0 4px color-mix(in oklch, var(--role-color), transparent 82%);
+}
+
+.cf-event-text {
+  color: var(--cf-text);
+  font-size: 13px;
+  font-weight: 620;
+  line-height: 1.45;
+}
+
+.cf-event-time {
+  grid-column: 2;
+  color: var(--cf-faint);
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.cf-role-badge,
+.cf-status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 720;
+  white-space: nowrap;
+}
+
+.cf-role-badge {
+  border: 1px solid color-mix(in oklch, var(--role-color), var(--cf-border) 48%);
+  background: color-mix(in oklch, var(--role-color), transparent 86%);
+  color: color-mix(in oklch, var(--role-color), var(--cf-text) 24%);
+}
+
+.cf-status-chip {
+  border: 1px solid color-mix(in oklch, var(--status-color), var(--cf-border) 52%);
+  background: color-mix(in oklch, var(--status-color), transparent 88%);
+  color: color-mix(in oklch, var(--status-color), var(--cf-text) 24%);
+}
+
+.cf-role-orchestrator {
+  --role-color: var(--cf-blue);
+}
+
+.cf-role-planner {
+  --role-color: var(--cf-cyan);
+}
+
+.cf-role-code-scout {
+  --role-color: var(--cf-purple);
+}
+
+.cf-role-implementer {
+  --role-color: var(--cf-green);
+}
+
+.cf-role-harness-reviewer {
+  --role-color: var(--cf-amber);
+}
+
+.cf-role-security-reviewer {
+  --role-color: var(--cf-red);
+}
+
+.cf-role-token-reviewer {
+  --role-color: var(--cf-pink);
+}
+
+.cf-role-delivery-manager {
+  --role-color: var(--cf-slate);
+}
+
+.cf-status-good {
+  --status-color: var(--cf-green);
+}
+
+.cf-status-bad {
+  --status-color: var(--cf-red);
+}
+
+.cf-status-running {
+  --status-color: var(--cf-blue);
+}
+
+.cf-status-warn {
+  --status-color: var(--cf-amber);
+}
+
+.cf-status-neutral {
+  --status-color: var(--cf-slate);
+}
+
+.cf-attention {
+  border-color: color-mix(in oklch, var(--cf-amber), var(--cf-border) 35%);
+  background: color-mix(in oklch, var(--cf-amber), var(--cf-panel) 91%);
+}
+
+.cf-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--cf-border);
+  border-radius: 8px;
+}
+
+.cf-table {
+  min-width: 100%;
+  border-collapse: collapse;
+  color: var(--cf-muted);
+  font-size: 13px;
+}
+
+.cf-table th {
+  background: var(--cf-panel-raised);
+  color: var(--cf-faint);
+  font-size: 11px;
+  font-weight: 720;
+  padding: 10px 12px;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.cf-table td {
+  border-top: 1px solid var(--cf-border);
+  padding: 12px;
+  vertical-align: middle;
+}
+
+.cf-table tr:hover td {
+  background: color-mix(in oklch, var(--cf-blue), transparent 95%);
+}
+
+.cf-filter-bar {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(140px, 1fr)) minmax(220px, 1.3fr);
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.cf-input,
+.cf-select {
+  width: 100%;
+  height: 36px;
+  border: 1px solid var(--cf-border);
+  border-radius: 8px;
+  background: var(--cf-panel-raised);
+  color: var(--cf-text);
+  padding: 0 10px;
+  font-size: 13px;
+  outline: none;
+}
+
+.cf-drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: oklch(10% 0.006 245 / 72%);
+}
+
+.cf-drawer {
+  margin-left: auto;
+  display: flex;
+  width: min(100vw, 760px);
+  height: 100%;
+  flex-direction: column;
+  border-left: 1px solid var(--cf-border);
+  background: var(--cf-bg);
+  box-shadow: -24px 0 80px oklch(7% 0.006 245 / 55%);
+}
+
+.cf-drawer-header,
+.cf-tabs {
+  border-bottom: 1px solid var(--cf-border);
+  padding: 16px;
+}
+
+.cf-tabs {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+
+.cf-tab {
+  min-height: 30px;
+  border: 1px solid var(--cf-border);
+  border-radius: 8px;
+  padding: 0 10px;
+  color: var(--cf-muted);
+  background: var(--cf-panel);
+  font-size: 12px;
+  font-weight: 680;
+}
+
+.cf-tab-active {
+  border-color: color-mix(in oklch, var(--cf-blue), var(--cf-border) 30%);
+  background: color-mix(in oklch, var(--cf-blue), var(--cf-panel) 82%);
+  color: var(--cf-text);
+}
+
+.cf-chat {
+  display: grid;
+  gap: 12px;
+}
+
+.cf-message {
+  border: 1px solid var(--cf-border);
+  border-radius: 8px;
+  background: var(--cf-panel);
+  padding: 12px;
+}
+
+.cf-message-user {
+  margin-right: 40px;
+}
+
+.cf-message-agent {
+  margin-left: 40px;
+  border-color: color-mix(in oklch, var(--role-color), var(--cf-border) 50%);
+  background: color-mix(in oklch, var(--role-color), var(--cf-panel) 92%);
+}
+
+.cf-message-error {
+  border-color: color-mix(in oklch, var(--cf-red), var(--cf-border) 40%);
+  background: color-mix(in oklch, var(--cf-red), var(--cf-panel) 88%);
+}
+
+.cf-raw pre {
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border: 1px solid var(--cf-border);
+  border-radius: 8px;
+  background: var(--cf-panel-raised);
+  padding: 10px;
+  color: var(--cf-muted);
+}
+
+.cf-settings-footer {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  border: 1px solid var(--cf-border);
+  border-radius: 8px;
+  background: color-mix(in oklch, var(--cf-panel-raised), var(--cf-bg) 18%);
+  padding: 12px;
+}
+
+@media (max-width: 1024px) {
+  .cf-topbar,
+  .cf-hero,
+  .cf-two-column,
+  .cf-filter-bar {
+    grid-template-columns: 1fr;
+  }
+
+  .cf-diagnostics {
+    justify-self: start;
+  }
+
+  .cf-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .cf-shell {
+    padding: 16px;
+  }
+
+  .cf-summary-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .cf-message-user,
+  .cf-message-agent {
+    margin-left: 0;
+    margin-right: 0;
+  }
+}

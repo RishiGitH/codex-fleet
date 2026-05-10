@@ -46,6 +46,9 @@ GET  /api/plane/login
 POST /api/onboarding/local-bootstrap
 GET  /api/projects
 GET  /api/projects/:id
+GET  /api/projects/:id/fleet-dashboard
+GET  /api/projects/:id/fleet-settings
+PATCH /api/projects/:id/fleet-settings
 GET  /api/projects/:id/agent-analytics
 GET  /api/projects/:id/control-plane-status
 POST /api/projects
@@ -59,12 +62,15 @@ GET  /api/runs/:id/artifacts/:artifact_id
 POST /api/runs/:id/retry
 POST /api/runs/:id/cancel
 GET  /api/work-items/:plane_id/children
+GET  /api/work-items/:plane_id/graph
 GET  /api/work-items/:plane_id/parent
 POST /api/work-items/:plane_id/answer-input
 POST /api/work-items/:plane_id/settings
 POST /api/work-items/:plane_id/plan
+POST /api/work-items/:plane_id/run
 POST /api/work-items/:plane_id/retry
 POST /api/work-items/:plane_id/cancel
+POST /api/work-items/:plane_id/delivery-task
 POST /api/runs/next-ready
 GET  /api/events
 GET  /api/work-items/ready
@@ -89,20 +95,25 @@ not an auth bypass for remote or hosted Plane.
 }
 ```
 
-`POST /api/projects` accepts:
+`POST /api/projects` accepts either an existing git repo path or a new Plane-native project request:
 
 ```json
 {
-  "path": "/absolute/or/relative/project/path",
-  "name": "Optional display name",
-  "apply_harness": true
+  "create_new": true,
+  "name": "Demo Web",
+  "parent_path": "/Users/me/projects",
+  "folder_slug": "demo-web",
+  "project_type": "simple-web",
+  "initial_goal": "Build the first screen",
+  "workflow_mode": "plan_execute",
+  "apply_harness": true,
+  "start_initial_goal": true
 }
 ```
 
-The path must exist and must be a directory. The API does not expose arbitrary
-shell execution. The response includes the local project, Plane mapping status,
-harness scan, and files written when `apply_harness` is true. This is the
-browser path used by the branded Plane project setup flow.
+For existing projects, pass `path` instead of `create_new`/`parent_path`. For new projects, codex-fleet creates a child folder inside the selected parent, initializes git, writes starter files, applies the harness when requested, registers the project, creates/links the Plane project, creates the initial work item, and starts orchestration unless the workflow mode is `plan_only`.
+
+If the target folder exists and is empty, it is reused. If it exists and is non-empty, the request is rejected. The API does not expose arbitrary shell execution. The response includes the local project, Plane mapping status, harness scan, written files, setup log, and optional initial item.
 
 When the codex-fleet runtime repo is already configured for Plane, project
 registration also tries to create or detect a matching Plane project in the same
@@ -205,7 +216,13 @@ For Plane-backed projects this endpoint returns an error; the work item source o
 
 `GET /api/projects/:id/control-plane-status` returns local readiness for API, daemon store, Plane connectivity, runner command, and local auth.
 
+`GET /api/projects/:id/fleet-dashboard` returns root tasks, child tasks, dependencies, runs, claims, events, artifacts, active agents, and token totals when reliable. Missing token usage is returned as unavailable rather than guessed.
+
+`GET`/`PATCH /api/projects/:id/fleet-settings` read and update canonical project defaults such as workflow mode, model, reasoning effort, sandbox/approval, max agents/depth, and subagent profiles.
+
 `GET /api/work-items/:plane_id/children` returns codex-fleet task metadata for child work items created from the parent.
+
+`GET /api/work-items/:plane_id/graph` returns the local parent/child graph, dependencies, and related runs for a work item.
 
 `GET /api/work-items/:plane_id/parent` returns codex-fleet task metadata linking the item back to the parent that created it, when present.
 
@@ -213,11 +230,13 @@ For Plane-backed projects this endpoint returns an error; the work item source o
 
 `POST /api/work-items/:plane_id/settings` persists per-task codex-fleet settings in local metadata so the task does not need to rely only on hidden description HTML.
 
-`POST /api/work-items/:plane_id/plan` moves the item to Ready, stores Full Agent planner settings, and dispatches that item as a planner run.
+`POST /api/work-items/:plane_id/plan` moves the item to Ready, stores planner settings, and dispatches that item as a planner run.
 
 `POST /api/work-items/:plane_id/retry` releases the latest claim when present, records a retry event, comments in Plane, and moves the item back to Ready. If the latest run was still active, it is marked cancelled with a retry note.
 
 `POST /api/work-items/:plane_id/cancel` records `cancel_requested`, marks the latest run cancelled when present, releases the latest claim, comments in Plane, and moves the item to Cancelled. `POST /api/runs/:id/cancel` performs the same operation from a known run id.
+
+`POST /api/work-items/:plane_id/delivery-task` creates a Backlog/Todo delivery-manager task. If a git remote exists, the task includes push/PR instructions. Without a remote, it includes local merge instructions. The endpoint never pushes, merges, deploys, or opens a PR.
 
 `GET /api/events?limit=100` returns recent run events across the local repo-scoped run store. The optional limit is clamped to a safe range.
 
