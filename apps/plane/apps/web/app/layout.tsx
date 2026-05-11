@@ -12,18 +12,12 @@ import "@/styles/globals.css";
 // helpers
 import { cn } from "@plane/utils";
 
-// assets
-import favicon16 from "@/app/assets/favicon/favicon-16x16.png?url";
-import favicon32 from "@/app/assets/favicon/favicon-32x32.png?url";
-import faviconIco from "@/app/assets/favicon/favicon.ico?url";
-import icon180 from "@/app/assets/icons/icon-180x180.png?url";
-import icon512 from "@/app/assets/icons/icon-512x512.png?url";
-
 // local
 import { AppProvider } from "./provider";
 
 const APP_TITLE = "codex-fleet | Local Codex agent control center";
 const APP_DESCRIPTION = "Local Codex agent control center for project work.";
+const CODEX_FLEET_ICON = "/codex-fleet-logo.svg";
 
 export const meta = () => [
   { title: APP_TITLE },
@@ -62,10 +56,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en">
       <head>
         <meta name="theme-color" content="#0B1020" />
-        <link rel="icon" type="image/png" sizes="32x32" href={favicon32} />
-        <link rel="icon" type="image/png" sizes="16x16" href={favicon16} />
+        <link rel="icon" type="image/svg+xml" href={CODEX_FLEET_ICON} />
         <link rel="manifest" href="/site.webmanifest.json" />
-        <link rel="shortcut icon" href={faviconIco} />
+        <link rel="shortcut icon" href={CODEX_FLEET_ICON} />
         {/* Meta info for PWA */}
         <meta name="application-name" content="codex-fleet" />
         <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -73,9 +66,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <meta name="apple-mobile-web-app-title" content="codex-fleet" />
         <meta name="format-detection" content="telephone=no" />
         <meta name="mobile-web-app-capable" content="yes" />
-        <link rel="apple-touch-icon" href={icon512} />
-        <link rel="apple-touch-icon" sizes="180x180" href={icon180} />
-        <link rel="apple-touch-icon" sizes="512x512" href={icon512} />
+        <link rel="apple-touch-icon" href={CODEX_FLEET_ICON} />
+        <link rel="apple-touch-icon" sizes="180x180" href={CODEX_FLEET_ICON} />
+        <link rel="apple-touch-icon" sizes="512x512" href={CODEX_FLEET_ICON} />
         <link rel="manifest" href="/manifest.json" />
       </head>
       <body>

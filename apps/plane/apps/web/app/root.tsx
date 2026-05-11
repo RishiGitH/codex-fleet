@@ -11,12 +11,6 @@ import type { LinksFunction } from "react-router";
 import { ThemeProvider, useTheme } from "next-themes";
 import { cn } from "@plane/utils";
 // types
-// assets
-import favicon16 from "@/app/assets/favicon/favicon-16x16.png?url";
-import favicon32 from "@/app/assets/favicon/favicon-32x32.png?url";
-import faviconIco from "@/app/assets/favicon/favicon.ico?url";
-import icon180 from "@/app/assets/icons/icon-180x180.png?url";
-import icon512 from "@/app/assets/icons/icon-512x512.png?url";
 import ogImage from "@/app/assets/og-image.png?url";
 import globalStyles from "@/styles/globals.css?url";
 import type { Route } from "./+types/root";
@@ -34,15 +28,15 @@ import "@fontsource/ibm-plex-mono";
 
 const APP_TITLE = "codex-fleet | Local Codex agent control center";
 const APP_DESCRIPTION = "Local Codex agent control center for project work.";
+const CODEX_FLEET_ICON = "/codex-fleet-logo.svg";
 
 export const links: LinksFunction = () => [
-  { rel: "icon", type: "image/png", sizes: "32x32", href: favicon32 },
-  { rel: "icon", type: "image/png", sizes: "16x16", href: favicon16 },
-  { rel: "shortcut icon", href: faviconIco },
+  { rel: "icon", type: "image/svg+xml", href: CODEX_FLEET_ICON },
+  { rel: "shortcut icon", href: CODEX_FLEET_ICON },
   { rel: "manifest", href: "/site.webmanifest.json" },
-  { rel: "apple-touch-icon", href: icon512 },
-  { rel: "apple-touch-icon", sizes: "180x180", href: icon180 },
-  { rel: "apple-touch-icon", sizes: "512x512", href: icon512 },
+  { rel: "apple-touch-icon", href: CODEX_FLEET_ICON },
+  { rel: "apple-touch-icon", sizes: "180x180", href: CODEX_FLEET_ICON },
+  { rel: "apple-touch-icon", sizes: "512x512", href: CODEX_FLEET_ICON },
   { rel: "manifest", href: "/manifest.json" },
   { rel: "stylesheet", href: globalStyles },
   {

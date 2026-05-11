@@ -70,6 +70,8 @@ export function Avatar(props: Props) {
 
   // get size details based on the size prop
   const sizeInfo = getSizeInfo(size);
+  const shouldUseCodexFleetLogo =
+    name?.trim().toLowerCase() === "codex-fleet local" || name?.trim().toLowerCase() === "codex-fleet";
 
   return (
     <Tooltip tooltipContent={fallbackText ?? name ?? "?"} disabled={!showTooltip}>
@@ -87,7 +89,13 @@ export function Avatar(props: Props) {
         }
         tabIndex={-1}
       >
-        {src ? (
+        {shouldUseCodexFleetLogo ? (
+          <img
+            src="/codex-fleet-logo.svg"
+            className={cn("h-full w-full", getBorderRadius(shape), className)}
+            alt={name}
+          />
+        ) : src ? (
           <img src={src} className={cn("h-full w-full", getBorderRadius(shape), className)} alt={name} />
         ) : (
           <div

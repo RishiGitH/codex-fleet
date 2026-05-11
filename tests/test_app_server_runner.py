@@ -33,6 +33,31 @@ def test_codex_app_server_runner_with_fake_server(tmp_path: Path) -> None:
     assert any("Agent role: implementer" in message.content for message in result.messages)
 
 
+def test_codex_app_server_prompt_strips_plane_description_html(tmp_path: Path) -> None:
+    fake_server = Path(__file__).parent / "fixtures" / "fake_app_server.py"
+    item = WorkItem(
+        id="1",
+        identifier="CF-1",
+        title="Run fake server",
+        description="<div><p><strong>Goal:</strong> Build it.</p><p>Ship proof.</p></div>",
+        state="Ready",
+    )
+    runner = CodexAppServerRunner(
+        command=f"{sys.executable} {fake_server}",
+        agent_role="implementer",
+        reasoning_effort="low",
+        timeout_seconds=5,
+    )
+
+    result = runner.run(item, tmp_path)
+    prompt = next(message.content for message in result.messages if message.kind == "chat_user")
+
+    assert "<div>" not in prompt
+    assert "<strong>" not in prompt
+    assert "Goal: Build it." in prompt
+    assert "Ship proof." in prompt
+
+
 def test_planner_app_server_run_blocks_when_contract_missing(tmp_path: Path) -> None:
     fake_server = Path(__file__).parent / "fixtures" / "fake_app_server.py"
     item = WorkItem(

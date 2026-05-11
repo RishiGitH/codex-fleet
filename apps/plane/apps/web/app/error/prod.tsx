@@ -51,16 +51,16 @@ export function ProdErrorComponent({ onGoHome }: ProdErrorComponentProps) {
             src={maintenanceModeImage}
             height="176"
             width="288"
-            alt="ProjectSettingImg"
+            alt="Codex Fleet error illustration"
             className="h-full w-full object-fill object-center"
           />
         </div>
         <div className="relative mt-4 flex w-full flex-col gap-4">
           <div className="flex flex-col gap-2.5">
-            <h1 className="text-left text-18 font-semibold text-primary">&#x1F6A7; Looks like something went wrong!</h1>
+            <h1 className="text-left text-18 font-semibold text-primary">Codex Fleet hit an issue.</h1>
             <span className="text-left text-14 font-medium text-secondary">
-              We track these errors automatically and working on getting things back up and running. If the problem
-              persists feel free to contact us. In the meantime, try refreshing.
+              The local Plane UI crashed while Codex Fleet was loading this page. Refresh once; if it keeps happening,
+              check the local API status and restart with make stop && make up.
             </span>
           </div>
 

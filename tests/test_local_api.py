@@ -238,6 +238,29 @@ def test_local_api_project_registration_can_save_settings_and_create_initial_goa
         thread.join(timeout=5)
 
 
+def test_codex_settings_payload_accepts_top_level_agent_profiles() -> None:
+    settings = local_api._codex_settings_payload(
+        {
+            "workflow_mode": "full_auto",
+            "subagents_enabled": True,
+            "enabled_agent_roles": ["planner", "implementer", "test_reviewer"],
+            "agent_profiles": {
+                "planner": {"model": "gpt-5.5", "reasoning_effort": "medium", "enabled": True},
+                "test_reviewer": {"model": "gpt-5.4-mini", "reasoning_effort": "high", "enabled": True},
+            },
+            "delivery_policy": {"create_draft_pr_on_success": True},
+            "test_policy": {"record_video": True},
+        }
+    )
+
+    assert settings["workflow_mode"] == "full_auto"
+    assert settings["subagents_enabled"] is True
+    assert settings["enabled_agent_roles"] == ["planner", "implementer", "test_reviewer"]
+    assert settings["agent_profiles"]["test_reviewer"]["reasoning_effort"] == "high"
+    assert settings["delivery_policy"]["create_draft_pr_on_success"] is True
+    assert settings["test_policy"]["record_video"] is True
+
+
 def test_local_api_extracts_codex_task_settings_from_work_item_description() -> None:
     item = WorkItem(
         id="item-1",

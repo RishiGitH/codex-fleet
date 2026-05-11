@@ -31,6 +31,8 @@ class WorktreeManager:
         self._ensure_under_root(path)
 
         if path.exists():
+            if base_branch:
+                self._fast_forward_existing(path, base_branch)
             return Workspace(path=path, branch_name=branch, created_now=False)
 
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -89,6 +91,20 @@ class WorktreeManager:
             if result.returncode == 0:
                 return Workspace(path=retry_path, branch_name=branch, created_now=True)
         return None
+
+    def _fast_forward_existing(self, path: Path, base_branch: str) -> None:
+        result = subprocess.run(
+            ["git", "merge", "--ff-only", base_branch],
+            cwd=path,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise WorkspaceError(
+                "Existing worktree could not fast-forward to dependency branch. "
+                f"base_branch={base_branch} stderr={result.stderr.strip()}"
+            )
 
     def _looks_like_stale_worktree(self, stderr: str) -> bool:
         lowered = stderr.lower()

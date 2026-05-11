@@ -196,10 +196,22 @@ class Orchestrator:
                         "agent_role": run.agent_role,
                     },
                 )
+            if hasattr(runner, "run_id"):
+                runner.run_id = run.id
             result = runner.run(item, workspace.path)
             run.codex_thread_id = result.codex_thread_id
             run.codex_turn_id = result.codex_turn_id
             run.token_usage = result.token_usage
+            if result.preview_url:
+                run.settings["preview_url"] = result.preview_url
+            if result.test_video_path:
+                run.settings["test_video_path"] = str(result.test_video_path)
+            if result.test_video_url:
+                run.settings["test_video_url"] = result.test_video_url
+            if result.screenshot_paths:
+                run.settings["screenshot_paths"] = [str(path) for path in result.screenshot_paths]
+            if result.test_proof_status:
+                run.settings["test_proof_status"] = result.test_proof_status
             self._persist(run)
             self._messages(run, result.messages)
             self._event(
@@ -237,7 +249,8 @@ class Orchestrator:
                     max_depth=max_depth,
                 )
                 if proposed_items and orchestration_mode in {"plan_only", "plan_execute", "full_auto"}:
-                    run.mark(RunStatus.HUMAN_REVIEW)
+                    child_done_state = WorkItemState.DONE.value if orchestration_mode == "full_auto" else WorkItemState.HUMAN_REVIEW.value
+                    run.mark(RunStatus.DONE if orchestration_mode == "full_auto" else RunStatus.HUMAN_REVIEW)
                     self._persist(run)
                     self._artifacts(run, result.artifacts)
                     parent_id = self._planner_parent_id(item) or item.id
@@ -245,7 +258,7 @@ class Orchestrator:
                     self.tracker.create_comment(parent_id, _success_comment(run, result.summary, result.test_commands, proposed_items))
                     self.tracker.update_item_state(parent_id, WorkItemState.PLANNING.value)
                     if parent_id != item.id:
-                        self.tracker.update_item_state(item.id, WorkItemState.HUMAN_REVIEW.value)
+                        self.tracker.update_item_state(item.id, child_done_state)
                     if self.store is not None:
                         self.store.finish_claim(item.id, run.id, "completed")
                     return OrchestratorResult(True, run, "Run created child tasks and moved parent to Planning.")
@@ -265,28 +278,33 @@ class Orchestrator:
                         self.store.finish_claim(item.id, run.id, "completed")
                     return OrchestratorResult(True, run, "Full auto completed and moved parent to Done.")
 
-                run.mark(RunStatus.HUMAN_REVIEW)
+                final_state = WorkItemState.HUMAN_REVIEW.value
+                final_status = RunStatus.HUMAN_REVIEW
+                if str(run.settings.get("parent_workflow_mode") or workflow_mode) == "full_auto" and self._task_depth(item) > 0:
+                    final_state = WorkItemState.DONE.value
+                    final_status = RunStatus.DONE
+                run.mark(final_status)
                 self._persist(run)
                 self._artifacts(run, result.artifacts)
                 self._event(
                     run,
                     "completed",
-                    {"state": WorkItemState.HUMAN_REVIEW.value, "proposed_task_count": len(proposed_items)},
+                    {"state": final_state, "proposed_task_count": len(proposed_items)},
                 )
                 self.tracker.create_comment(
                     item.id,
                     _success_comment(run, result.summary, result.test_commands, proposed_items),
                 )
-                self.tracker.update_item_state(item.id, WorkItemState.HUMAN_REVIEW.value)
-                if self._confirm_item_state(item.id, WorkItemState.HUMAN_REVIEW.value):
-                    self._event(run, "state_update_confirmed", {"state": WorkItemState.HUMAN_REVIEW.value})
+                self.tracker.update_item_state(item.id, final_state)
+                if self._confirm_item_state(item.id, final_state):
+                    self._event(run, "state_update_confirmed", {"state": final_state})
                 else:
-                    self._event(run, "state_update_pending", {"requested_state": WorkItemState.HUMAN_REVIEW.value})
-                    self.tracker.create_comment(item.id, _state_update_pending_comment(run, WorkItemState.HUMAN_REVIEW.value))
+                    self._event(run, "state_update_pending", {"requested_state": final_state})
+                    self.tracker.create_comment(item.id, _state_update_pending_comment(run, final_state))
                     return OrchestratorResult(True, run, "Run completed, but Plane state confirmation is pending.")
                 if self.store is not None:
                     self.store.finish_claim(item.id, run.id, "completed")
-                return OrchestratorResult(True, run, "Run completed and moved to Human Review.")
+                return OrchestratorResult(True, run, f"Run completed and moved to {final_state}.")
 
             if result.needs_input is not None:
                 question = result.needs_input.question
@@ -295,6 +313,13 @@ class Orchestrator:
                         "Codex asked for the same input again even though a human answer is already attached. "
                         "Review the latest answer in this task, clarify the work item if needed, then retry."
                     )
+                full_auto_recovery = self._recover_full_auto_blocker(run, item, question, max_depth=max_depth)
+                if full_auto_recovery is not None:
+                    self._persist(run)
+                    self._artifacts(run, result.artifacts)
+                    if self.store is not None:
+                        self.store.finish_claim(item.id, run.id, "completed")
+                    return full_auto_recovery
                 run.mark(RunStatus.NEEDS_INPUT, question)
                 self._persist(run)
                 self._artifacts(run, result.artifacts)
@@ -316,6 +341,13 @@ class Orchestrator:
                 return OrchestratorResult(True, run, "Run needs human input.")
 
             run.mark(RunStatus.REWORK, result.error)
+            full_auto_recovery = self._recover_full_auto_blocker(run, item, result.error or result.summary, max_depth=max_depth)
+            if full_auto_recovery is not None:
+                self._persist(run)
+                self._artifacts(run, result.artifacts)
+                if self.store is not None:
+                    self.store.finish_claim(item.id, run.id, "completed")
+                return full_auto_recovery
             self._persist(run)
             self._artifacts(run, result.artifacts)
             target_state = WorkItemState.NEEDS_INPUT.value
@@ -394,7 +426,7 @@ class Orchestrator:
                 data = artifact.read_bytes()
                 size_bytes = len(data)
                 digest = sha256(data).hexdigest()
-            self.store.add_artifact(run.id, str(artifact), size_bytes=size_bytes, sha256=digest)
+            self.store.add_artifact(run.id, str(artifact), kind=_artifact_kind(artifact), size_bytes=size_bytes, sha256=digest)
 
     def _messages(self, run: RunRecord, messages: tuple[object, ...]) -> None:
         if self.store is None:
@@ -470,7 +502,11 @@ class Orchestrator:
                 continue
             if item is not None:
                 created.append(item)
-                created_by_title[_dependency_key(task.title)] = item.id
+                dependency_keys = {_dependency_key(task.title)}
+                if task.planner_id:
+                    dependency_keys.add(_dependency_key(task.planner_id))
+                for dependency_key in dependency_keys:
+                    created_by_title[dependency_key] = item.id
                 dependency_ids = tuple(
                     created_by_title[_dependency_key(dependency)]
                     for dependency in task.depends_on
@@ -706,9 +742,9 @@ class Orchestrator:
             failed = [child for child in children if child.state in {WorkItemState.REWORK.value, WorkItemState.BLOCKED.value, WorkItemState.CANCELLED.value, WorkItemState.NEEDS_INPUT.value}]
             if failed:
                 self._record_parent_waiting_on_child(parent, failed, children_metadata)
-                return OrchestratorResult(False, None, "Full auto parent is waiting on a child task.")
+                continue
             if all(child.state in {WorkItemState.HUMAN_REVIEW.value, WorkItemState.DONE.value} for child in children):
-                synthetic = RunRecord(id=str(uuid4()), item=parent, status=RunStatus.HUMAN_REVIEW)
+                synthetic = RunRecord(id=str(uuid4()), item=parent, status=RunStatus.DONE)
                 primary = self._primary_child_run(children_metadata)
                 if primary is not None:
                     synthetic.branch_name = primary.branch_name
@@ -716,6 +752,7 @@ class Orchestrator:
                     synthetic.model = primary.model
                     synthetic.reasoning_effort = primary.reasoning_effort
                     synthetic.settings = dict(primary.settings)
+                synthetic.settings.update(self._aggregate_child_proof(children_metadata))
                 self._create_delivery_task(synthetic, "All required child tasks passed.", ("child tasks passed",))
                 self.tracker.create_comment(parent.id, "codex-fleet full auto completed all required child tasks and moved this parent to Done.")
                 self.tracker.update_item_state(parent.id, WorkItemState.DONE.value)
@@ -736,6 +773,21 @@ class Orchestrator:
             if run is not None:
                 return run
         return None
+
+    def _aggregate_child_proof(self, children_metadata: Sequence[TaskMetadata]) -> dict[str, object]:
+        if self.store is None:
+            return {}
+        proof: dict[str, object] = {}
+        for metadata in children_metadata:
+            run = self.store.latest_run_for_item(str(metadata.item_id))
+            if run is None:
+                continue
+            settings = run.settings or {}
+            for key in ("preview_url", "test_video_path", "test_video_url", "screenshot_paths", "test_proof_status"):
+                value = settings.get(key)
+                if value and key not in proof:
+                    proof[key] = value
+        return proof
 
     def _record_parent_waiting_on_child(
         self,
@@ -781,9 +833,187 @@ class Orchestrator:
                 time.sleep(delay_seconds)
         return False
 
+    def _recover_full_auto_blocker(
+        self,
+        run: RunRecord,
+        item: WorkItem,
+        blocker: str | None,
+        *,
+        max_depth: int,
+    ) -> OrchestratorResult | None:
+        if self.store is None:
+            return None
+        parent_mode = str(run.settings.get("parent_workflow_mode") or run.settings.get("workflow_mode") or "")
+        if parent_mode != "full_auto" or self._task_depth(item) == 0:
+            return None
+        blocker_text = (blocker or "Agent reported a blocker.").strip()
+        if _is_hard_human_blocker(blocker_text):
+            return None
+        role = _normalize_agent_role(run.agent_role)
+        if role == "planner":
+            proposed_items = self._create_full_auto_fallback_tasks(run, item, blocker_text, max_depth=max_depth)
+            if not proposed_items:
+                return None
+            parent_id = self._planner_parent_id(item) or item.id
+            run.mark(RunStatus.DONE)
+            self._event(run, "planner_fallback_created", {"parent_item_id": parent_id, "child_count": len(proposed_items), "blocker": blocker_text})
+            self.tracker.create_comment(
+                parent_id,
+                "codex-fleet kept full auto moving by using reasonable assumptions and creating fallback child tasks:\n"
+                + "\n".join(f"- `{child.identifier}` {child.title}" for child in proposed_items),
+            )
+            self.tracker.update_item_state(parent_id, WorkItemState.PLANNING.value)
+            self.tracker.create_comment(
+                item.id,
+                "codex-fleet converted the planner blocker into fallback child tasks for full auto.\n\n"
+                f"Original blocker: {blocker_text}",
+            )
+            self.tracker.update_item_state(item.id, WorkItemState.DONE.value)
+            return OrchestratorResult(True, run, "Full auto planner blocker converted into child tasks.")
+
+        repair = self._create_repair_task(run, item, blocker_text, max_depth=max_depth)
+        if repair is None:
+            return None
+        run.mark(RunStatus.DONE)
+        self._event(run, "auto_repair_task_created", {"item_id": repair.id, "identifier": repair.identifier, "source_item_id": item.id, "blocker": blocker_text})
+        self.tracker.create_comment(
+            item.id,
+            "codex-fleet converted this full-auto blocker into a repair task and marked this agent task complete.\n\n"
+            f"Repair task: `{repair.identifier}`\n\n"
+            f"Original blocker: {blocker_text}",
+        )
+        self.tracker.update_item_state(item.id, WorkItemState.DONE.value)
+        parent_id = self._root_parent_id(item)
+        if parent_id:
+            self.tracker.create_comment(parent_id, f"codex-fleet created repair task `{repair.identifier}` for `{item.identifier}`.")
+            self.tracker.update_item_state(parent_id, WorkItemState.PLANNING.value)
+        return OrchestratorResult(True, run, f"Full auto created repair task {repair.identifier}.")
+
+    def _create_full_auto_fallback_tasks(
+        self,
+        run: RunRecord,
+        item: WorkItem,
+        blocker: str,
+        *,
+        max_depth: int,
+    ) -> tuple[WorkItem, ...]:
+        parent_id = self._planner_parent_id(item)
+        parent_items = self.tracker.fetch_items_by_ids([parent_id]) if parent_id else []
+        parent = parent_items[0] if parent_items else item
+        implement_title = f"Build {parent.identifier}: {parent.title}"
+        tasks = (
+            ProposedTask(
+                title=implement_title,
+                description=(
+                    "Implement the parent request end to end. The planner asked for more information, but this is "
+                    "a full-auto run, so make reasonable product assumptions and proceed. "
+                    f"Original planner blocker: {blocker}"
+                ),
+                role="implementer",
+            ),
+            ProposedTask(
+                title="Quality review implementation",
+                description="Review build correctness, harness fit, token/context efficiency, and residual risks. Do not edit product source.",
+                role="quality_reviewer",
+                depends_on=(implement_title,),
+            ),
+            ProposedTask(
+                title="Test implementation and record proof",
+                description="Run the app or available tests, capture preview proof, screenshots, and video when possible. Do not edit product source.",
+                role="test_reviewer",
+                depends_on=(implement_title,),
+            ),
+        )
+        return self._create_proposed_tasks(run, tasks, workflow_mode="full_auto", max_depth=max_depth)
+
+    def _create_repair_task(
+        self,
+        run: RunRecord,
+        item: WorkItem,
+        blocker: str,
+        *,
+        max_depth: int,
+    ) -> WorkItem | None:
+        if self.store is None:
+            return None
+        metadata = self.store.get_task_metadata(item.id)
+        if metadata is None or not metadata.parent_item_id:
+            return None
+        if metadata.depth >= max_depth:
+            return None
+        repair_count = self._repair_task_count(metadata.parent_item_id)
+        if repair_count >= 2:
+            return None
+        inherited_settings = metadata.settings or run.settings
+        if not _role_enabled(inherited_settings, "implementer"):
+            return None
+        try:
+            repair = self.tracker.create_work_item(
+                title=f"Fix blocker from {item.identifier}: {item.title}",
+                description=(
+                    "Resolve the blocker found by a full-auto child agent, then run relevant verification.\n\n"
+                    f"Blocked task: `{item.identifier}`\n\n"
+                    f"Agent role that found it: `{_normalize_agent_role(run.agent_role)}`\n\n"
+                    f"Blocker:\n{blocker}"
+                ),
+                state=WorkItemState.READY.value,
+                labels=("agent-followup", "agent-implementer", "agent-repair"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._event(run, "repair_task_failed", {"error": str(exc), "source_item_id": item.id})
+            return None
+        if repair is None:
+            return None
+        self.store.upsert_task_metadata(
+            item_id=repair.id,
+            source="agent-repair",
+            depth=metadata.depth + 1,
+            parent_item_id=metadata.parent_item_id,
+            parent_identifier=metadata.parent_identifier,
+            parent_run_id=run.id,
+            created_by_run_id=run.id,
+            root_item_id=metadata.root_item_id or metadata.parent_item_id,
+            role="implementer",
+            generation=metadata.generation + 1,
+            approval_mode="full_auto",
+            settings={
+                **_child_task_settings(inherited_settings, "implementer", parent_workflow_mode="full_auto", max_depth=max_depth),
+                "repair_of_item_id": item.id,
+                "repair_of_identifier": item.identifier,
+                "repair_blocker": blocker,
+            },
+        )
+        try:
+            self.tracker.create_comment(repair.id, f"codex-fleet created this repair task from `{item.identifier}` during full auto. Keep the fix narrow and verify it.")
+        except Exception as exc:  # noqa: BLE001
+            self._event(run, "repair_task_comment_failed", {"item_id": repair.id, "error": str(exc)})
+        return repair
+
+    def _repair_task_count(self, parent_item_id: str) -> int:
+        if self.store is None:
+            return 0
+        return sum(1 for metadata in self.store.list_child_task_metadata(parent_item_id) if metadata.source == "agent-repair")
+
+    def _root_parent_id(self, item: WorkItem) -> str | None:
+        if self.store is None:
+            return None
+        metadata = self.store.get_task_metadata(item.id)
+        if metadata is None:
+            return None
+        return metadata.parent_item_id or metadata.root_item_id
+
     def _create_delivery_task(self, run: RunRecord, summary: str, test_commands: tuple[str, ...]) -> WorkItem | None:
         title = f"Publish or merge result for {run.item.identifier}"
         tests = "\n".join(f"- `{command}`" for command in test_commands) or "- Not reported"
+        preview_url = str(run.settings.get("preview_url") or "Not reported by the latest agent run.")
+        video_path = str(run.settings.get("test_video_path") or "Not reported")
+        video_url = str(run.settings.get("test_video_url") or "")
+        screenshots = run.settings.get("screenshot_paths")
+        screenshot_lines = (
+            "\n".join(f"- `{path}`" for path in screenshots if isinstance(path, str))
+            if isinstance(screenshots, list) and screenshots
+            else "- Not reported"
+        )
         description = (
             f"Prepare delivery for `{run.item.identifier}`.\n\n"
             f"Parent id: `{run.item.id}`\n\n"
@@ -791,7 +1021,17 @@ class Orchestrator:
             f"Worktree: `{run.worktree_path or 'Not reported'}`\n\n"
             f"Summary: {summary}\n\n"
             f"Test results:\n{tests}\n\n"
-            "Preview URL: Not reported by the latest agent run.\n\n"
+            f"Preview URL: {preview_url}\n\n"
+            f"Playwright video URL: {video_url or 'Not reported'}\n\n"
+            + (
+                f'<video controls preload="metadata" width="720" src="{video_url}">'
+                f'<a href="{video_url}">Open Playwright video</a>'
+                "</video>\n\n"
+                if video_url
+                else ""
+            )
+            + f"Playwright video: `{video_path}`\n\n"
+            f"Screenshots:\n{screenshot_lines}\n\n"
             "PR URL: Not created yet. If this repo has a GitHub origin, codex-fleet should create a draft PR before delivery completion.\n\n"
             "Mark this delivery task Done to merge the result and clean up the worktree. If merge or cleanup fails, codex-fleet will move this task to Needs Input and keep the worktree intact."
         )
@@ -830,6 +1070,10 @@ class Orchestrator:
                     "delivery_status": "task_created",
                     "branch": run.branch_name,
                     "worktree": str(run.worktree_path) if run.worktree_path else None,
+                    "preview_url": preview_url,
+                    "test_video_path": video_path,
+                    "test_video_url": video_url or None,
+                    "screenshot_paths": screenshots if isinstance(screenshots, list) else [],
                 },
             )
             self._event(run, "delivery_task_created", {"item_id": item.id, "identifier": item.identifier})
@@ -901,6 +1145,26 @@ def _success_comment(
     proposed_items: tuple[WorkItem, ...] = (),
 ) -> str:
     tests = "\n".join(f"- {command}" for command in test_commands) or "- not reported"
+    proof_lines: list[str] = []
+    preview_url = run.settings.get("preview_url")
+    if isinstance(preview_url, str) and preview_url.strip():
+        proof_lines.append(f"- Preview URL: {preview_url}")
+    video_path = run.settings.get("test_video_path")
+    video_url = run.settings.get("test_video_url")
+    if isinstance(video_url, str) and video_url.strip():
+        proof_lines.append(f"- Playwright video: {video_url}")
+        proof_lines.append(
+            f'<video controls preload="metadata" width="720" src="{video_url}">'
+            f'<a href="{video_url}">Open Playwright video</a>'
+            "</video>"
+        )
+    if isinstance(video_path, str) and video_path.strip():
+        proof_lines.append(f"- Playwright video path: `{video_path}`")
+    screenshots = run.settings.get("screenshot_paths")
+    if isinstance(screenshots, list) and screenshots:
+        proof_lines.append("- Screenshots:")
+        proof_lines.extend(f"  - `{path}`" for path in screenshots if isinstance(path, str))
+    proof = "\n\nTest proof:\n" + "\n".join(proof_lines) if proof_lines else ""
     proposed = ""
     if proposed_items:
         proposed_lines = "\n".join(f"- `{item.identifier}` {item.title}" for item in proposed_items)
@@ -911,8 +1175,33 @@ def _success_comment(
         f"Workspace: `{run.worktree_path}`\n\n"
         f"Summary: {summary}\n\n"
         f"Verification:\n{tests}"
+        f"{proof}"
         f"{proposed}"
     )
+
+
+def _artifact_kind(path: Path) -> str:
+    name = path.name.lower()
+    suffix = path.suffix.lower()
+    if name == "install.log" or "install" in name:
+        return "install_log"
+    if name == "build.log" or "build" in name:
+        return "build_log"
+    if name == "preview.log" or "preview" in name:
+        return "preview_log"
+    if name.endswith("desktop.png"):
+        return "desktop_screenshot"
+    if name.endswith("mobile.png"):
+        return "mobile_screenshot"
+    if suffix in {".webm", ".mp4"} or "video" in path.parts:
+        return "playwright_video"
+    if "summary" in name or "proof" in name:
+        return "test_summary"
+    if "metadata" in name:
+        return "preview_metadata"
+    if "transcript" in name:
+        return "transcript"
+    return "file"
 
 
 def _state_update_pending_comment(run: RunRecord, requested_state: str) -> str:
@@ -986,6 +1275,32 @@ def _question_words(value: str) -> set[str]:
 
     stop = {"the", "a", "an", "and", "or", "for", "to", "of", "is", "are", "what", "please", "provide", "any"}
     return {word for word in re.findall(r"[a-z0-9]+", value.lower()) if len(word) > 2 and word not in stop}
+
+
+def _is_hard_human_blocker(value: str) -> bool:
+    lowered = value.lower()
+    hard_markers = (
+        "app server",
+        "authentication",
+        "credential",
+        "permission denied",
+        "not authorized",
+        "missing api key",
+        "openai_api_key",
+        "rate limit",
+        "quota",
+        "restart with",
+        "local setup",
+        "filedescriptor",
+        "invalid json-rpc",
+        "dependency installation failed",
+        "npm install failed",
+        "pnpm install failed",
+        "yarn install failed",
+        "pip install failed",
+        "uv sync failed",
+    )
+    return any(marker in lowered for marker in hard_markers)
 
 
 def _task_depth_from_description(description: str | None) -> int:

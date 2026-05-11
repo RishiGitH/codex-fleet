@@ -21,6 +21,7 @@ class PlannerTask:
     priority: str
     depends_on: tuple[str, ...]
     workflow_mode: str
+    planner_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,7 @@ def _planner_task(raw: Any) -> PlannerTask:
     if not isinstance(raw, dict):
         raise PlannerContractError("Each planner task must be an object.")
     title = _required_text(raw, "title")
+    planner_id = _optional_text(raw, "id")
     description = _planner_description(raw)
     role = _normalize_planner_role(_required_text(raw, "role"))
     if role not in PLANNER_TASK_ROLES:
@@ -78,6 +80,7 @@ def _planner_task(raw: Any) -> PlannerTask:
         priority=priority,
         depends_on=depends_on,
         workflow_mode=workflow_mode,
+        planner_id=planner_id,
     )
 
 

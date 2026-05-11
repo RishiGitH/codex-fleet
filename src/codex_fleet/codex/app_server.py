@@ -12,6 +12,7 @@ from typing import Any, TextIO, cast
 
 from codex_fleet.codex.protocol import (
     IdSequence,
+    ProtocolError,
     extract_thread_id,
     extract_turn_id,
     initialize_message,
@@ -149,7 +150,11 @@ def _send(stdin: TextIO, line: str) -> None:
 
 def _read_response(reader: _LineReader, request_id: int, timeout_seconds: int) -> dict[str, Any]:
     for line in reader.read_json_lines(timeout_seconds):
-        payload = parse_json_line(line)
+        try:
+            payload = parse_json_line(line)
+        except ProtocolError:
+            reader.noise.append(line.rstrip())
+            continue
         if payload.get("id") == request_id:
             return payload
     raise AppServerError(f"Timed out waiting for response id {request_id}")
@@ -158,7 +163,11 @@ def _read_response(reader: _LineReader, request_id: int, timeout_seconds: int) -
 def _wait_for_turn(reader: _LineReader, timeout_seconds: int) -> tuple[bool, list[dict[str, Any]]]:
     messages: list[dict[str, Any]] = []
     for line in reader.read_json_lines(timeout_seconds):
-        payload = parse_json_line(line)
+        try:
+            payload = parse_json_line(line)
+        except ProtocolError:
+            reader.noise.append(line.rstrip())
+            continue
         if payload.get("method"):
             messages.append(payload)
         if is_turn_completed(payload):
@@ -183,6 +192,7 @@ class _LineReader:
     def __init__(self, stdout: TextIO) -> None:
         self.stdout = stdout
         self.lines: Queue[str | None] = Queue()
+        self.noise: list[str] = []
         self.thread = threading.Thread(target=self._read_lines, daemon=True)
         self.thread.start()
 

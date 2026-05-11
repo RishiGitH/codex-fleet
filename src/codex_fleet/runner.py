@@ -9,6 +9,8 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from html import unescape
+from html.parser import HTMLParser
 from json import dumps, loads
 from pathlib import Path
 from queue import Empty, Queue
@@ -25,6 +27,7 @@ from codex_fleet.models import (
     WorkItemState,
 )
 from codex_fleet.planner import PlannerContractError, parse_planner_output
+from codex_fleet.test_proof import run_test_proof
 
 
 class Runner(ABC):
@@ -81,6 +84,7 @@ class CodexAppServerRunner(Runner):
         self.agent_role = agent_role
         self.human_answers = human_answers or []
         self.timeout_seconds = timeout_seconds
+        self.run_id: str | None = None
 
     def run(self, item: WorkItem, workspace: Path) -> RunResult:
         prompt = _prompt_for_item(item, role_override=self.agent_role, human_answers=self.human_answers)
@@ -129,7 +133,11 @@ class CodexAppServerRunner(Runner):
             notifications=outcome.messages,
             output_path=output_path,
         )
-        transcript_text = "\n".join(message.content for message in messages if message.kind not in {"tool_result", "raw_event"})
+        transcript_text = "\n".join(
+            message.content
+            for message in messages
+            if message.kind not in {"chat_user", "tool_result", "raw_event"}
+        )
         output_path.write_text("\n\n".join(_format_run_message(message) for message in messages))
         changed_files = tuple(_changed_files(workspace))
         role = _normalize_role(role)
@@ -161,7 +169,10 @@ class CodexAppServerRunner(Runner):
                 codex_turn_id=outcome.turn_id,
                 error=needs_input.question,
             )
-        verification_artifact, verification_commands, verification_error = _verify_test_agent_output(workspace, role)
+        proof_result = _verify_test_agent_output(workspace, role, run_id=self.run_id or item.safe_identifier)
+        verification_artifacts = proof_result.artifacts
+        verification_commands = proof_result.commands
+        verification_error = proof_result.error
         if role == "test_reviewer" and verification_error:
             needs_input = NeedsInput(
                 question=f"Test Agent could not verify the app: {verification_error}",
@@ -173,26 +184,39 @@ class CodexAppServerRunner(Runner):
                 summary=needs_input.question,
                 changed_files=changed_files,
                 test_commands=tuple(command for command in (install_command, *verification_commands, "reported by Codex App Server") if command),
-                artifacts=tuple(path for path in (install_artifact, output_path, verification_artifact) if path is not None),
+                artifacts=tuple(path for path in (install_artifact, output_path, *verification_artifacts) if path is not None),
                 proposed_tasks=proposed_tasks,
                 needs_input=needs_input,
                 token_usage=token_usage,
                 messages=messages,
                 codex_thread_id=outcome.thread_id,
                 codex_turn_id=outcome.turn_id,
+                preview_url=proof_result.preview_url,
+                test_video_path=proof_result.video_path,
+                test_video_url=proof_result.video_url,
+                screenshot_paths=proof_result.screenshot_paths,
+                test_proof_status=proof_result.status,
                 error=needs_input.question,
             )
+        summary = _tail(transcript_text) or f"Codex {outcome.summary} for {item.identifier}."
+        if item.identifier and item.identifier not in summary:
+            summary = f"{item.identifier}: {summary}"
         return RunResult(
             success=outcome.completed,
-            summary=_tail(transcript_text) or f"Codex {outcome.summary} for {item.identifier}.",
+            summary=summary,
             changed_files=changed_files,
             test_commands=tuple(command for command in (install_command, *verification_commands, "reported by Codex App Server") if command),
-            artifacts=tuple(path for path in (install_artifact, output_path, verification_artifact) if path is not None),
+            artifacts=tuple(path for path in (install_artifact, output_path, *verification_artifacts) if path is not None),
             proposed_tasks=proposed_tasks,
             token_usage=token_usage,
             messages=messages,
             codex_thread_id=outcome.thread_id,
             codex_turn_id=outcome.turn_id,
+            preview_url=proof_result.preview_url,
+            test_video_path=proof_result.video_path,
+            test_video_url=proof_result.video_url,
+            screenshot_paths=proof_result.screenshot_paths,
+            test_proof_status=proof_result.status,
             error=None if outcome.completed else outcome.summary,
         )
 
@@ -348,7 +372,7 @@ def _prompt_for_item(
     role_override: str | None = None,
     human_answers: list[dict[str, object]] | None = None,
 ) -> str:
-    description = item.description or "No description provided."
+    description = _plain_text(item.description) or "No description provided."
     role = _normalize_role(role_override) if role_override else _role_for_item(item)
     role_contract = _role_prompt_contract(role)
     answer_section = _human_answers_prompt_section(human_answers or [])
@@ -359,6 +383,10 @@ def _prompt_for_item(
         f"{answer_section}"
         "You are running inside codex-fleet. Do not call Plane directly; the daemon parses your final answer "
         "and updates Plane. Keep Plane-facing summaries concise and do not dump raw logs, secrets, or large diffs.\n\n"
+        "For full-auto or agent follow-up work, keep moving with reasonable product assumptions. Do not ask the "
+        "human for subjective copy, audience, style, feature, or section details; state your assumptions and proceed. "
+        "Use `codex-fleet-needs-input` only for real blockers such as missing credentials, inaccessible files, "
+        "destructive approval, impossible local setup, or dependency installation failures.\n\n"
         f"{role_contract}\n\n"
         "If you are blocked on user input, include exactly one fenced block named `codex-fleet-needs-input` "
         "containing JSON with `question`, optional `needed_to_continue`, and optional `suggested_state`.\n\n"
@@ -366,6 +394,44 @@ def _prompt_for_item(
         "`codex-fleet-planner-output` containing the required JSON object: `summary`, `tasks`, and `reviewers`. "
         "Do not include secrets."
     )
+
+
+class _HtmlToTextParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() in {"br", "p", "div", "li", "section", "article", "h1", "h2", "h3", "h4", "tr"}:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() in {"p", "div", "li", "section", "article", "h1", "h2", "h3", "h4", "tr"}:
+            self.parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        self.parts.append(data)
+
+    def text(self) -> str:
+        joined = unescape("".join(self.parts))
+        lines = [" ".join(line.split()) for line in joined.splitlines()]
+        return re.sub(r"\n{3,}", "\n\n", "\n".join(line for line in lines if line)).strip()
+
+
+def _plain_text(value: str | None) -> str:
+    if not value:
+        return ""
+    raw = str(value)
+    if "<" not in raw or ">" not in raw:
+        return unescape(raw).strip()
+    parser = _HtmlToTextParser()
+    try:
+        parser.feed(raw)
+        parser.close()
+        text = parser.text()
+    except Exception:
+        text = re.sub(r"<[^>]+>", "", unescape(raw)).strip()
+    return text or re.sub(r"<[^>]+>", "", unescape(raw)).strip()
 
 
 def _human_answers_prompt_section(human_answers: list[dict[str, object]]) -> str:
@@ -654,6 +720,7 @@ def parse_planner_tasks(output: str) -> tuple[ProposedTask, ...]:
                     title=task.title,
                     description=task.description,
                     role=task.role,
+                    planner_id=task.planner_id,
                     depends_on=task.depends_on,
                     labels=(f"priority-{task.priority}",),
                 )
@@ -978,6 +1045,7 @@ def _proposed_task_from_raw(raw: Any) -> ProposedTask | None:
         description=description.strip()[:4000] if isinstance(description, str) and description.strip() else None,
         role=role.strip()[:80] if isinstance(role, str) and role.strip() else None,
         depends_on=tuple(dict.fromkeys(clean_depends_on)),
+        planner_id=str(raw.get("id")).strip()[:120] if str(raw.get("id") or "").strip() else None,
         suggested_state=suggested_state.strip()[:80] if isinstance(suggested_state, str) and suggested_state.strip() else None,
         labels=tuple(dict.fromkeys(clean_labels)),
     )
@@ -999,29 +1067,32 @@ def _ensure_dependencies(workspace: Path) -> tuple[Path | None, str | None, str 
     return None, None, None
 
 
-def _verify_test_agent_output(workspace: Path, role: str) -> tuple[Path | None, tuple[str, ...], str | None]:
+@dataclass(frozen=True)
+class _ProofAdapterResult:
+    artifacts: tuple[Path, ...] = ()
+    commands: tuple[str, ...] = ()
+    error: str | None = None
+    preview_url: str | None = None
+    video_path: Path | None = None
+    video_url: str | None = None
+    screenshot_paths: tuple[Path, ...] = ()
+    status: str | None = None
+
+
+def _verify_test_agent_output(workspace: Path, role: str, *, run_id: str) -> _ProofAdapterResult:
     if role != "test_reviewer":
-        return None, (), None
-    package_json = workspace / "package.json"
-    if not package_json.exists():
-        artifact = workspace / ".codex-fleet-test-proof.txt"
-        artifact.write_text("No runnable web package detected. Test Agent skipped preview proof for this task.\n")
-        return artifact, ("test proof skipped: no package.json",), None
-    build_artifact, build_command, build_error = _run_artifact_command(
-        workspace,
-        "npm run build",
-        artifact_name=".codex-fleet-build.log",
-        timeout_seconds=900,
+        return _ProofAdapterResult()
+    result = run_test_proof(workspace, run_id=run_id)
+    return _ProofAdapterResult(
+        artifacts=result.artifacts,
+        commands=result.commands,
+        error=result.error,
+        preview_url=result.preview_url,
+        video_path=result.video_path,
+        video_url=result.video_url,
+        screenshot_paths=result.screenshot_paths,
+        status=result.status,
     )
-    if build_error:
-        return build_artifact, tuple(command for command in (build_command,) if command), build_error
-    proof = workspace / ".codex-fleet-test-proof.txt"
-    proof.write_text(
-        "Test Agent proof\n"
-        f"- Build command: {build_command}\n"
-        "- Preview/video capture requires a runnable dev server and is recorded by browser E2E when available.\n"
-    )
-    return proof, tuple(command for command in (build_command, "test proof recorded") if command), None
 
 
 def _run_artifact_command(

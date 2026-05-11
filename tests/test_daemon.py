@@ -167,6 +167,44 @@ def test_daemon_moves_planning_parent_to_review_when_all_children_are_terminal(t
     assert [event.kind for event in store.list_events("parent-run")] == ["parent_children_completed"]
 
 
+def test_daemon_does_not_move_full_auto_parent_to_human_review(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    config = FleetConfig(repo=repo, workspace=WorkspaceConfig(root=tmp_path / "workspaces")).resolved()
+    store = RunStore(tmp_path / "runs.sqlite3")
+    store.upsert_task_metadata(
+        item_id="1",
+        source="human-requested",
+        depth=0,
+        settings={"workflow_mode": "full_auto"},
+    )
+    store.upsert_task_metadata(
+        item_id="2",
+        source="agent-followup",
+        depth=1,
+        parent_item_id="1",
+        parent_identifier="CF-1",
+        parent_run_id="parent-run",
+    )
+    tracker = MemoryTracker(
+        [
+            WorkItem(id="1", identifier="CF-1", title="Parent", description=None, state="Planning"),
+            WorkItem(id="2", identifier="CF-2", title="Child", description=None, state="Done"),
+        ]
+    )
+    daemon = FleetDaemon(config, fake_runner=True)
+    daemon.store = store
+    daemon.tracker = tracker
+
+    completed = daemon.reconcile_completed_parents()
+
+    assert completed == 0
+    assert tracker.fetch_items_by_ids(["1"])[0].state == "Planning"
+    assert tracker.comments.get("1") is None
+    assert store.list_events("parent-run") == []
+
+
 def test_daemon_keeps_planning_parent_blocked_when_child_needs_attention(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()

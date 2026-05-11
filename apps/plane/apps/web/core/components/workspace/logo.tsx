@@ -18,16 +18,23 @@ type Props = {
 export const WorkspaceLogo = observer(function WorkspaceLogo(props: Props) {
   // translation
   const { t } = useTranslation();
+  const isCodexFleetWorkspace = props.name?.trim().toLowerCase() === "codex-fleet";
 
   return (
     <div
       className={cn(
         `relative grid h-6 w-6 flex-shrink-0 place-items-center uppercase ${
-          !props.logo && "rounded-md bg-accent-primary text-on-color"
+          !props.logo && !isCodexFleetWorkspace && "rounded-md bg-accent-primary text-on-color"
         } ${props.classNames ? props.classNames : ""}`
       )}
     >
-      {props.logo && props.logo !== "" ? (
+      {isCodexFleetWorkspace ? (
+        <img
+          src="/codex-fleet-logo.svg"
+          className="absolute top-0 left-0 h-full w-full rounded-md object-cover"
+          alt={t("aria_labels.projects_sidebar.workspace_logo")}
+        />
+      ) : props.logo && props.logo !== "" ? (
         <img
           src={getFileURL(props.logo)}
           className="absolute top-0 left-0 h-full w-full rounded-md object-cover"

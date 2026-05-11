@@ -110,6 +110,11 @@ class RunResult:
     messages: tuple[RunMessage, ...] = ()
     codex_thread_id: str | None = None
     codex_turn_id: str | None = None
+    preview_url: str | None = None
+    test_video_path: Path | None = None
+    test_video_url: str | None = None
+    screenshot_paths: tuple[Path, ...] = ()
+    test_proof_status: str | None = None
     error: str | None = None
 
 
@@ -125,6 +130,7 @@ class ProposedTask:
     title: str
     description: str | None = None
     role: str | None = None
+    planner_id: str | None = None
     depends_on: tuple[str, ...] = ()
     suggested_state: str | None = None
     labels: tuple[str, ...] = ("agent-proposed",)

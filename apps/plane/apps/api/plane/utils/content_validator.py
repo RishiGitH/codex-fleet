@@ -75,6 +75,8 @@ CUSTOM_TAGS = {
     "label",
     "input",
     "image-component",
+    "video",
+    "source",
 }
 ALLOWED_TAGS = nh3.ALLOWED_TAGS | CUSTOM_TAGS
 
@@ -112,6 +114,8 @@ ATTRIBUTES = {
         "data-block-type",
     },
     "a": {"href", "target"},
+    "video": {"src", "controls", "preload", "width", "height", "poster", "muted", "playsinline"},
+    "source": {"src", "type"},
     # editor node/tag attributes
     "image-component": {
         "id",

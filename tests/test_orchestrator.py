@@ -320,6 +320,37 @@ def test_planner_title_dependencies_are_resolved_to_child_ids(tmp_path: Path) ->
     assert second_metadata.depends_on == (first.id,)
 
 
+def test_planner_id_dependencies_are_resolved_to_child_ids(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    parent = WorkItem(id="1", identifier="CF-1", title="Parent", description=None, state="Planning")
+    planner = WorkItem(id="2", identifier="CF-2", title="Plan CF-1", description=None, state="Ready", labels=("agent-planner",))
+    tracker = MemoryTracker([parent, planner], active_states=["Ready"])
+    config = FleetConfig(repo=repo, workspace=WorkspaceConfig(root=tmp_path / "workspaces")).resolved()
+    store = RunStore(tmp_path / "runs.sqlite3")
+    store.upsert_task_metadata(item_id="1", source="human-requested", depth=0, settings={"workflow_mode": "full_auto"})
+    store.upsert_task_metadata(
+        item_id="2",
+        source="agent-followup",
+        depth=1,
+        parent_item_id="1",
+        parent_identifier="CF-1",
+        root_item_id="1",
+        role="planner",
+        settings={"workflow_mode": "execute_only", "parent_workflow_mode": "full_auto", "agent_role": "planner"},
+    )
+
+    result = Orchestrator(config=config, tracker=tracker, runner=PlannerIdDependencyRunner(), store=store).run_once()
+
+    assert result.run is not None
+    first = [item for item in tracker.fetch_all_items() if item.title == "Scaffold app"][0]
+    second = [item for item in tracker.fetch_all_items() if item.title == "Test app"][0]
+    second_metadata = store.get_task_metadata(second.id)
+    assert second_metadata is not None
+    assert second_metadata.depends_on == (first.id,)
+
+
 def test_full_auto_parent_completes_after_children_pass_and_creates_delivery_task(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -365,21 +396,118 @@ def test_full_auto_parent_waiting_on_child_comment_is_deduplicated(tmp_path: Pat
     init_git_repo(repo)
     parent = WorkItem(id="1", identifier="CF-1", title="Parent", description=None, state="Planning")
     child = WorkItem(id="2", identifier="CF-2", title="Child", description=None, state="Needs Input")
-    tracker = MemoryTracker([parent, child], active_states=["Ready"])
+    sibling = WorkItem(id="3", identifier="CF-3", title="Sibling", description=None, state="Ready")
+    tracker = MemoryTracker([parent, child, sibling], active_states=["Ready"])
     config = FleetConfig(repo=repo, workspace=WorkspaceConfig(root=tmp_path / "workspaces")).resolved()
     store = RunStore(tmp_path / "runs.sqlite3")
     store.upsert_task_metadata(item_id="1", source="human-requested", depth=0, settings={"workflow_mode": "full_auto"})
     store.upsert_task_metadata(item_id="2", source="agent-followup", depth=1, parent_item_id="1", role="planner")
+    store.upsert_task_metadata(item_id="3", source="agent-followup", depth=1, parent_item_id="1", role="implementer")
 
     orchestrator = Orchestrator(config=config, tracker=tracker, runner=FakeRunner(), store=store)
     first = orchestrator.run_once()
     second = orchestrator.run_once()
 
-    assert first.message == "Full auto parent is waiting on a child task."
-    assert second.message == "Full auto parent is waiting on a child task."
+    assert first.message == "Run completed and moved to Human Review."
+    assert first.run is not None
+    assert first.run.item.identifier == "CF-3"
+    assert second.message == "No candidate work items found."
     assert len(tracker.comments["1"]) == 1
     assert "waiting on child `CF-2`" in tracker.comments["1"][0]
     assert [event.kind for event in store.list_events("parent:1")] == ["parent_blocked"]
+
+
+def test_full_auto_child_success_moves_child_to_done(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    parent = WorkItem(id="1", identifier="CF-1", title="Parent", description=None, state="Planning")
+    child = WorkItem(id="2", identifier="CF-2", title="Implement", description=None, state="Ready", labels=("agent-implementer",))
+    tracker = MemoryTracker([parent, child], active_states=["Ready"])
+    config = FleetConfig(repo=repo, workspace=WorkspaceConfig(root=tmp_path / "workspaces")).resolved()
+    store = RunStore(tmp_path / "runs.sqlite3")
+    store.upsert_task_metadata(item_id="1", source="human-requested", depth=0, settings={"workflow_mode": "full_auto"})
+    store.upsert_task_metadata(
+        item_id="2",
+        source="agent-followup",
+        depth=1,
+        parent_item_id="1",
+        parent_identifier="CF-1",
+        role="implementer",
+        settings={"workflow_mode": "execute_only", "parent_workflow_mode": "full_auto", "agent_role": "implementer"},
+    )
+
+    result = Orchestrator(config=config, tracker=tracker, runner=FakeRunner(), store=store).run_once()
+
+    assert result.run is not None
+    assert result.run.status == RunStatus.DONE
+    assert tracker.fetch_items_by_ids(["2"])[0].state == "Done"
+
+
+def test_full_auto_planner_question_creates_fallback_tasks(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    parent = WorkItem(id="1", identifier="CF-1", title="Landing page", description=None, state="Planning")
+    planner = WorkItem(id="2", identifier="CF-2", title="Plan CF-1", description=None, state="Ready", labels=("agent-planner",))
+    tracker = MemoryTracker([parent, planner], active_states=["Ready"])
+    config = FleetConfig(repo=repo, workspace=WorkspaceConfig(root=tmp_path / "workspaces")).resolved()
+    store = RunStore(tmp_path / "runs.sqlite3")
+    store.upsert_task_metadata(item_id="1", source="human-requested", depth=0, settings={"workflow_mode": "full_auto"})
+    store.upsert_task_metadata(
+        item_id="2",
+        source="agent-followup",
+        depth=1,
+        parent_item_id="1",
+        parent_identifier="CF-1",
+        root_item_id="1",
+        role="planner",
+        settings={"workflow_mode": "execute_only", "parent_workflow_mode": "full_auto", "agent_role": "planner"},
+    )
+
+    result = Orchestrator(config=config, tracker=tracker, runner=NeedsInputRunner(), store=store).run_once()
+
+    assert result.message == "Full auto planner blocker converted into child tasks."
+    assert tracker.fetch_items_by_ids(["2"])[0].state == "Done"
+    created_roles = {
+        store.get_task_metadata(item.id).role
+        for item in tracker.fetch_all_items()
+        if item.id not in {"1", "2"} and store.get_task_metadata(item.id) is not None
+    }
+    assert {"implementer", "quality_reviewer", "test_reviewer"} <= created_roles
+    assert tracker.fetch_items_by_ids(["1"])[0].state == "Planning"
+
+
+def test_full_auto_child_question_creates_bounded_repair_task(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    parent = WorkItem(id="1", identifier="CF-1", title="Parent", description=None, state="Planning")
+    child = WorkItem(id="2", identifier="CF-2", title="Test app", description=None, state="Ready", labels=("agent-test-reviewer",))
+    tracker = MemoryTracker([parent, child], active_states=["Ready"])
+    config = FleetConfig(repo=repo, workspace=WorkspaceConfig(root=tmp_path / "workspaces")).resolved()
+    store = RunStore(tmp_path / "runs.sqlite3")
+    store.upsert_task_metadata(item_id="1", source="human-requested", depth=0, settings={"workflow_mode": "full_auto"})
+    store.upsert_task_metadata(
+        item_id="2",
+        source="agent-followup",
+        depth=1,
+        parent_item_id="1",
+        parent_identifier="CF-1",
+        root_item_id="1",
+        role="test_reviewer",
+        settings={"workflow_mode": "execute_only", "parent_workflow_mode": "full_auto", "agent_role": "test_reviewer"},
+    )
+
+    result = Orchestrator(config=config, tracker=tracker, runner=NeedsInputRunner(), store=store).run_once()
+
+    assert result.run is not None
+    assert result.run.status == RunStatus.DONE
+    assert tracker.fetch_items_by_ids(["2"])[0].state == "Done"
+    repairs = [item for item in tracker.fetch_all_items() if "agent-repair" in item.labels]
+    assert len(repairs) == 1
+    assert repairs[0].state == "Ready"
+    assert store.get_task_metadata(repairs[0].id).role == "implementer"
 
 
 def test_orchestrator_records_failure_event(tmp_path: Path) -> None:
@@ -601,6 +729,24 @@ class DependentPlanningRunner(Runner):
                     description="Build the page.",
                     role="implementer",
                     depends_on=("Scout files",),
+                ),
+            ),
+        )
+
+
+class PlannerIdDependencyRunner(Runner):
+    def run(self, item: WorkItem, workspace: Path) -> RunResult:
+        return RunResult(
+            success=True,
+            summary="Planned dependent work.",
+            proposed_tasks=(
+                ProposedTask(title="Scaffold app", description="Create the app.", role="implementer", planner_id="PLN-2-1"),
+                ProposedTask(
+                    title="Test app",
+                    description="Test the app.",
+                    role="test_reviewer",
+                    planner_id="PLN-2-2",
+                    depends_on=("PLN-2-1",),
                 ),
             ),
         )

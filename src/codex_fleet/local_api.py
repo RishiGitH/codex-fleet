@@ -2896,9 +2896,20 @@ def _codex_settings_payload(payload: dict[str, Any]) -> dict[str, Any]:
         value = payload.get(key)
         if isinstance(value, int):
             settings[key] = value
+    for key in ("subagents_enabled",):
+        value = payload.get(key)
+        if isinstance(value, bool):
+            settings[key] = value
+    enabled_agent_roles = payload.get("enabled_agent_roles")
+    if isinstance(enabled_agent_roles, list):
+        settings["enabled_agent_roles"] = [role for role in enabled_agent_roles if isinstance(role, str)]
     subagents = payload.get("subagents")
     if isinstance(subagents, dict):
         settings["subagents"] = subagents
+    for key in ("agent_profiles", "delivery_policy", "test_policy"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            settings[key] = value
     return settings
 
 

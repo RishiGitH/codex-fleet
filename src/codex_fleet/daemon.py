@@ -213,6 +213,10 @@ class FleetDaemon:
             parent = items.get(parent_id)
             if parent is None or parent.state.lower() != WorkItemState.PLANNING.value.lower():
                 continue
+            parent_metadata = self.store.get_task_metadata(parent_id)
+            parent_settings = parent_metadata.settings if parent_metadata is not None else {}
+            if parent_settings.get("workflow_mode") == "full_auto":
+                continue
             child_items = [items.get(metadata.item_id) for metadata in child_metadata]
             if any(item is None for item in child_items):
                 continue

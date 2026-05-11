@@ -27,7 +27,7 @@ export function LogoSpinner() {
           className="absolute inset-3 rounded-xl bg-custom-primary-100/10"
           style={{ animation: "codexFleetPulse 1.6s ease-out infinite" }}
         />
-        <img src="/codex-fleet-logo.svg" alt="" className="relative size-8" />
+        <img src="/codex-fleet-logo.svg" alt="" className="relative size-8" aria-hidden="true" />
       </div>
     </div>
   );
