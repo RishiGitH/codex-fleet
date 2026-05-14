@@ -52,6 +52,7 @@ from codex_fleet.tracker import Tracker
 DEFAULT_LOCAL_API_HOST = "127.0.0.1"
 DEFAULT_LOCAL_API_PORT = 18790
 STARTER_PROJECT_TYPES = {"blank", "simple-web", "node-next", "python"}
+NEXT_STARTER_DEPENDENCIES = {"next": "16.2.6", "react": "19.2.6", "react-dom": "19.2.6"}
 LOGIN_NONCE_TTL_SECONDS = 120
 SESSION_CODE_TTL_SECONDS = 120
 CODEX_FLEET_API_BUILD = "codex-fleet-api-board-simplified-v1"
@@ -1444,14 +1445,20 @@ def _write_starter_files(target: Path, *, name: str, project_type: str) -> None:
                     "scripts": {
                         "dev": "next dev",
                         "build": "next build",
-                        "lint": "next lint",
                     },
-                    "dependencies": {"next": "latest", "react": "latest", "react-dom": "latest"},
+                    "dependencies": NEXT_STARTER_DEPENDENCIES,
                     "devDependencies": {},
                 },
                 indent=2,
             )
             + "\n",
+        )
+        _write_if_missing(
+            target / "app/layout.tsx",
+            "import type { ReactNode } from \"react\";\n\n"
+            "export default function RootLayout({ children }: { children: ReactNode }) {\n"
+            "  return <html lang=\"en\"><body>{children}</body></html>;\n"
+            "}\n",
         )
         _write_if_missing(target / "app/page.tsx", f"export default function Page() {{\n  return <main>{name}</main>;\n}}\n")
     elif project_type == "python":

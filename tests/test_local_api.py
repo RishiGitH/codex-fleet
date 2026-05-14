@@ -995,6 +995,38 @@ def test_local_api_creates_new_starter_project(tmp_path: Path) -> None:
         thread.join(timeout=5)
 
 
+def test_local_api_creates_next_starter_with_pinned_safe_dependencies(tmp_path: Path) -> None:
+    parent = tmp_path / "projects"
+    parent.mkdir()
+    server = create_local_api_server(tmp_path, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        created = _json_request(
+            f"{base_url}/api/projects",
+            method="POST",
+            token=server.token,
+            payload={
+                "create_new": True,
+                "name": "Demo Next",
+                "location": str(parent),
+                "project_type": "node-next",
+            },
+        )
+        project_path = Path(created["project"]["repo_path"])
+        package = json.loads((project_path / "package.json").read_text())
+
+        assert package["dependencies"] == local_api.NEXT_STARTER_DEPENDENCIES
+        assert "latest" not in package["dependencies"].values()
+        assert package["scripts"] == {"dev": "next dev", "build": "next build"}
+        assert (project_path / "app/layout.tsx").exists()
+        assert (project_path / "app/page.tsx").exists()
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
 def test_local_api_create_new_reports_non_empty_target(tmp_path: Path) -> None:
     parent = tmp_path / "projects"
     target = parent / "Sample-App"
