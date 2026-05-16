@@ -49,9 +49,15 @@ class TokenConfig(BaseModel):
     default_doc_limit: int = 8_000
     skill_limit: int = 4_000
     raw_artifact_retention: str = "keep"
+    compression_mode: Literal["off", "native", "external"] = "off"
+    context_pack_profile: Literal["minimal", "task", "full"] = "minimal"
     enable_rtk: bool = False
     enable_caveman: bool = False
     enable_repomix: bool = False
+    rtk_command: str = "rtk"
+    caveman_command: str = "caveman"
+    repomix_command: str = "repomix"
+    graphify_command: str = "graphify"
 
 
 class FleetConfig(BaseModel):
@@ -120,9 +126,15 @@ def write_default_config(repo: Path, path: Path | None = None) -> Path:
         "  default_doc_limit: 8000\n"
         "  skill_limit: 4000\n"
         "  raw_artifact_retention: keep\n"
+        "  compression_mode: off\n"
+        "  context_pack_profile: minimal\n"
         "  enable_rtk: false\n"
         "  enable_caveman: false\n"
         "  enable_repomix: false\n"
+        "  rtk_command: rtk\n"
+        "  caveman_command: caveman\n"
+        "  repomix_command: repomix\n"
+        "  graphify_command: graphify\n"
     )
     return target
 
@@ -182,9 +194,15 @@ def write_plane_tracker_config(
             "default_doc_limit": 8000,
             "skill_limit": 4000,
             "raw_artifact_retention": "keep",
+            "compression_mode": "off",
+            "context_pack_profile": "minimal",
             "enable_rtk": False,
             "enable_caveman": False,
             "enable_repomix": False,
+            "rtk_command": "rtk",
+            "caveman_command": "caveman",
+            "repomix_command": "repomix",
+            "graphify_command": "graphify",
         },
     )
     target.write_text(yaml.safe_dump(raw, sort_keys=False))

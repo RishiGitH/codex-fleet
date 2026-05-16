@@ -6,6 +6,9 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from codex_fleet.budget import scan_budget
+from codex_fleet.token_tools import detect_token_tools
+
 
 @dataclass(frozen=True)
 class DoctorFinding:
@@ -50,6 +53,9 @@ def scan_repo(repo: Path, *, codex_command: str = "codex exec") -> DoctorReport:
     missing(".env.example", "missing_env_example", "Missing .env.example.", "Document required environment variables without secrets.")
     missing("README.md", "missing_readme", "Missing README.md.", "Add setup and usage docs.")
 
+    if (repo / "pyproject.toml").exists():
+        _python_findings(repo, findings)
+
     has_tests = any((repo / path).exists() for path in ["tests", "test", "spec", "__tests__"])
     if not has_tests:
         findings.append(
@@ -83,6 +89,38 @@ def scan_repo(repo: Path, *, codex_command: str = "codex exec") -> DoctorReport:
                 "info",
                 "No GitHub Actions workflow found.",
                 "This is expected while the project uses local-only testing; add CI later only when desired.",
+            )
+        )
+
+    budget = scan_budget(repo)
+    if not budget.ok:
+        findings.append(
+            DoctorFinding(
+                "context_budget_exceeded",
+                "warning",
+                f"{budget.too_large_count} guidance/context file(s) exceed configured token budgets.",
+                "Run `python -m codex_fleet budget --repo . --strict` and trim always-loaded guidance or large skills.",
+            )
+        )
+
+    if (repo / ".agents" / "skills" / "impeccable" / "scripts").exists():
+        findings.append(
+            DoctorFinding(
+                "large_frontend_skill_present",
+                "info",
+                "Large frontend skill assets are present.",
+                "Keep Impeccable opt-in for UI work and exclude its scripts from routine context packs.",
+            )
+        )
+
+    missing_optional_tools = [tool.name for tool in detect_token_tools() if not tool.available]
+    if missing_optional_tools:
+        findings.append(
+            DoctorFinding(
+                "optional_token_tools_missing",
+                "info",
+                "Some optional token/context helper tools are not installed: " + ", ".join(missing_optional_tools),
+                "No action required. codex-fleet falls back to native capture, budget, and context-pack behavior.",
             )
         )
 
@@ -130,6 +168,28 @@ def _is_git_repo(repo: Path) -> bool:
     except OSError:
         return False
     return result.returncode == 0 and result.stdout.strip() == "true"
+
+
+def _python_findings(repo: Path, findings: list[DoctorFinding]) -> None:
+    if shutil.which("python") is None and shutil.which("python3") is not None:
+        findings.append(
+            DoctorFinding(
+                "python_command_mismatch",
+                "info",
+                "`python` was not found, but `python3` is available.",
+                "Use `make install` or `python3 -m venv .venv`; generated docs should prefer the repo Makefile or detected interpreter.",
+            )
+        )
+    venv_python = repo / ".venv" / "bin" / "python"
+    if not venv_python.exists():
+        findings.append(
+            DoctorFinding(
+                "venv_not_created",
+                "info",
+                "Local `.venv` is not present.",
+                "Run `make install` before local checks; npx launcher creates its own tool venv for package-style use.",
+            )
+        )
 
 
 def _command_binary(command: str) -> str | None:

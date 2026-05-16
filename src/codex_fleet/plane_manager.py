@@ -808,9 +808,15 @@ def write_plane_config(
             "default_doc_limit": 8000,
             "skill_limit": 4000,
             "raw_artifact_retention": "keep",
+            "compression_mode": "off",
+            "context_pack_profile": "minimal",
             "enable_rtk": False,
             "enable_caveman": False,
             "enable_repomix": False,
+            "rtk_command": "rtk",
+            "caveman_command": "caveman",
+            "repomix_command": "repomix",
+            "graphify_command": "graphify",
         },
     }
     target.write_text(yaml.safe_dump(data, sort_keys=False))

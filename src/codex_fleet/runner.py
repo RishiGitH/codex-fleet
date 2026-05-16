@@ -23,6 +23,7 @@ from codex_fleet.models import (
     WorkItem,
     WorkItemState,
 )
+from codex_fleet.prompt_protocol import build_runner_prompt
 
 
 class Runner(ABC):
@@ -237,19 +238,7 @@ def check_codex_cli_preflight(command_parts: list[str]) -> RunnerPreflight:
 
 
 def _prompt_for_item(item: WorkItem) -> str:
-    description = item.description or "No description provided."
-    return (
-        f"Work item {item.identifier}: {item.title}\n\n"
-        f"Description:\n{description}\n\n"
-        "You are running inside codex-fleet. Do not call Plane directly; the daemon parses your final answer "
-        "and updates Plane. Keep Plane-facing summaries concise and do not dump raw logs, secrets, or large diffs.\n\n"
-        "Make the smallest safe change, run relevant tests, and summarize changed files plus verification.\n\n"
-        "If you are blocked on user input, include exactly one fenced block named `codex-fleet-needs-input` "
-        "containing JSON with `question`, optional `needed_to_continue`, and optional `suggested_state`.\n\n"
-        "If separate follow-up work should become Plane tasks, include one fenced block named "
-        "`codex-fleet-proposed-tasks` containing a JSON array of objects with `title`, optional `description`, "
-        "optional `role`, optional `depends_on`, optional `suggested_state`, and optional `labels`. Do not include secrets."
-    )
+    return build_runner_prompt(item)
 
 
 def parse_proposed_tasks(output: str) -> tuple[ProposedTask, ...]:

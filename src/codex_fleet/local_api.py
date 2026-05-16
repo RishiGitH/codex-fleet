@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
+from codex_fleet.budget import scan_budget
 from codex_fleet.config import load_config, write_plane_tracker_config
 from codex_fleet.execution_settings import (
     config_with_codex_settings,
@@ -46,6 +47,7 @@ from codex_fleet.project_registry import (
     normalize_codex_settings,
 )
 from codex_fleet.store import RunStore, StoredArtifact, StoredEvent, StoredRun
+from codex_fleet.token_tools import capabilities_payload, tool_commands_from_config
 from codex_fleet.tracker import Tracker
 
 DEFAULT_LOCAL_API_HOST = "127.0.0.1"
@@ -1384,6 +1386,11 @@ def _harness_plan_payload(plan: HarnessPlan, *, status: str) -> dict[str, Any]:
 def _control_plane_status_payload(server: LocalApiServer, repo: Path) -> dict[str, Any]:
     config = load_config(repo)
     store = RunStore(default_store_path(config.repo))
+    budget = scan_budget(
+        config.repo,
+        default_doc_limit=config.token.default_doc_limit,
+        skill_limit=config.token.skill_limit,
+    )
     plane_ready = False
     plane_detail = "tracker is not Plane"
     if config.tracker.kind == "plane":
@@ -1417,6 +1424,21 @@ def _control_plane_status_payload(server: LocalApiServer, repo: Path) -> dict[st
         "plane": {"ready": plane_ready, "detail": plane_detail},
         "runner": {"ready": runner_ready, "detail": runner_detail},
         "auth": {"ready": bool(server.token), "mode": "local-token"},
+        "tool_capabilities": capabilities_payload(tool_commands_from_config(config.token)),
+        "context_budget": {
+            "ok": budget.ok,
+            "too_large_count": budget.too_large_count,
+            "entries": [
+                {
+                    "path": entry.path,
+                    "tokens": entry.estimated_tokens,
+                    "limit": entry.limit,
+                    "status": entry.status,
+                }
+                for entry in budget.entries
+            ],
+        },
+        "recommended_context_profile": config.token.context_pack_profile,
     }
 
 

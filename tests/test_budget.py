@@ -57,6 +57,8 @@ def test_token_config_loads_optional_placeholders(tmp_path: Path) -> None:
         "  default_doc_limit: 123\n"
         "  skill_limit: 45\n"
         "  raw_artifact_retention: 30d\n"
+        "  compression_mode: native\n"
+        "  context_pack_profile: task\n"
         "  enable_rtk: true\n"
         "  enable_caveman: false\n"
         "  enable_repomix: true\n"
@@ -67,6 +69,8 @@ def test_token_config_loads_optional_placeholders(tmp_path: Path) -> None:
     assert config.token.default_doc_limit == 123
     assert config.token.skill_limit == 45
     assert config.token.raw_artifact_retention == "30d"
+    assert config.token.compression_mode == "native"
+    assert config.token.context_pack_profile == "task"
     assert config.token.enable_rtk is True
     assert config.token.enable_caveman is False
     assert config.token.enable_repomix is True

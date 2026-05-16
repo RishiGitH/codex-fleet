@@ -2,6 +2,7 @@ import os
 import threading
 import time
 from pathlib import Path
+from typing import Literal, cast
 from urllib.parse import urlencode, urlparse
 
 import click
@@ -77,6 +78,7 @@ from codex_fleet.pr_flow import PrRequest, create_draft_pr
 from codex_fleet.project_registry import ProjectRegistry, default_project_registry_path
 from codex_fleet.runner import FakeRunner
 from codex_fleet.store import RunStore
+from codex_fleet.token_tools import capabilities_payload, tool_commands_from_config
 from codex_fleet.tracker import MemoryTracker
 
 console = Console()
@@ -268,11 +270,28 @@ def budget(repo: Path, strict: bool) -> None:
 @main.command("pack-context")
 @click.option("--repo", type=click.Path(path_type=Path), default=Path.cwd())
 @click.option("--out", "out_dir", type=click.Path(path_type=Path), required=True)
-def pack_context(repo: Path, out_dir: Path) -> None:
+@click.option("--profile", type=click.Choice(["minimal", "task", "full"]), default=None)
+@click.option("--include", "includes", multiple=True, help="Include glob for task context packs.")
+@click.option("--max-tokens", type=int, default=None, help="Optional rough token cap for source listing.")
+def pack_context(
+    repo: Path,
+    out_dir: Path,
+    profile: str | None,
+    includes: tuple[str, ...],
+    max_tokens: int | None,
+) -> None:
     """Write a small targeted context pack."""
     config = load_config(repo)
-    result = write_context_pack(config.repo, out_dir)
+    selected_profile = profile or config.token.context_pack_profile
+    result = write_context_pack(
+        config.repo,
+        out_dir,
+        profile=cast(Literal["minimal", "task", "full"], selected_profile),
+        includes=includes,
+        max_tokens=max_tokens,
+    )
     console.print(f"Context pack: {result.out_dir}")
+    console.print(f"Profile: {result.profile}")
     console.print(f"Files indexed: {result.file_count}")
     console.print(f"Rough tokens: {result.estimated_tokens}")
     console.print(f"Exclusions: {', '.join(result.exclusions)}")
@@ -283,15 +302,56 @@ def pack_context(repo: Path, out_dir: Path) -> None:
     context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
 )
 @click.option("--repo", type=click.Path(path_type=Path), default=Path.cwd())
+@click.option(
+    "--compress",
+    type=click.Choice(["off", "native", "external", "auto"]),
+    default=None,
+    help="Write optional compressed.txt after raw output is saved.",
+)
 @click.argument("command", nargs=-1, type=click.UNPROCESSED)
-def capture(repo: Path, command: tuple[str, ...]) -> None:
+def capture(repo: Path, compress: str | None, command: tuple[str, ...]) -> None:
     """Run a command and store raw plus summarized output artifacts."""
     config = load_config(repo)
-    result = capture_command(config.repo, command)
+    compression_mode = compress or config.token.compression_mode
+    if compression_mode == "auto":
+        compression_mode = "external" if config.token.enable_rtk else "native"
+    result = capture_command(
+        config.repo,
+        command,
+        compression_mode=compression_mode,
+        rtk_command=config.token.rtk_command,
+    )
     console.print(f"Artifacts: {result.artifact_dir}")
     console.print(f"Raw output: {result.raw_path}")
     console.print(f"Summary: {result.summary_path}")
+    if result.compressed_path:
+        console.print(f"Compressed: {result.compressed_path}")
     raise click.exceptions.Exit(result.returncode)
+
+
+@main.group("tools")
+def tools_group() -> None:
+    """Inspect optional token and context helper tools."""
+
+
+@tools_group.command("doctor")
+@click.option("--repo", type=click.Path(path_type=Path), default=Path.cwd())
+def tools_doctor(repo: Path) -> None:
+    """Show optional tool availability without requiring installation."""
+    config = load_config(repo)
+    table = Table(title="Optional Codex helper tools")
+    table.add_column("tool")
+    table.add_column("available")
+    table.add_column("command")
+    table.add_column("recommendation")
+    for name, payload in capabilities_payload(tool_commands_from_config(config.token)).items():
+        table.add_row(
+            name,
+            "yes" if payload["available"] else "no",
+            str(payload["command"]),
+            str(payload["recommendation"]),
+        )
+    console.print(table)
 
 
 @main.command("plane-check")

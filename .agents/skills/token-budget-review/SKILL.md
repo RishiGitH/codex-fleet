@@ -12,6 +12,8 @@ Check:
 - repeated instructions across AGENTS, WORKFLOW, docs, and skills
 - oversized docs, skills, prompts, logs, and generated summaries
 - broad repo dumps where targeted search or a small context pack would work
+- whether `pack-context` uses the smallest safe profile: `minimal`, `task`, then `full`
+- whether heavy optional skill assets are excluded from routine context
 - whether raw command output is saved before summarization
 - whether compressed summaries are safe for the task
 - whether exact code or security-sensitive evidence is being compressed unsafely
