@@ -8,6 +8,10 @@ export type CodexFleetProject = {
   plane_project_id: string | null;
   harness_status: string;
   runner_mode: string;
+  path_status: "ok" | "missing_folder" | "not_git";
+  plane_status: "linked" | "relinked" | "created" | "stale" | "error" | "skipped";
+  status_message: string;
+  can_run: boolean;
   codex_settings: CodexFleetProjectSettings;
 };
 

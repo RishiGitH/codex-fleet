@@ -10,7 +10,7 @@ type LocalSettings = {
 };
 
 const DEFAULT_API_URL = "http://127.0.0.1:18790";
-const DEFAULT_DASHBOARD_PATH = "/codex-fleet/projects/";
+const DEFAULT_DASHBOARD_PATH = "/codex-fleet/dashboard";
 
 function readLocalSettings(): LocalSettings {
   if (typeof window === "undefined") {

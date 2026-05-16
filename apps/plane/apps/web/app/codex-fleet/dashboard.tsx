@@ -49,6 +49,7 @@ export default function CodexFleetDashboard() {
 
   const api = () => new CodexFleetLocalApi({ baseUrl: apiUrl.trim() || undefined, token: token.trim() || null });
   const selectedProjectNumber = selectedProjectId ? Number(selectedProjectId) : undefined;
+  const selectedProject = projects.find((project) => project.id === selectedProjectNumber);
 
   const refresh = async (projectOverride?: number) => {
     setBusy(true);
@@ -58,13 +59,25 @@ export default function CodexFleetDashboard() {
       if (apiUrl.trim()) window.localStorage.setItem("codexFleetLocalApiUrl", apiUrl.trim());
       if (selectedProjectId) window.localStorage.setItem("codexFleetProjectId", selectedProjectId);
       const projectResult = await api().projects();
+      const savedProject = projectResult.projects.find((project) => project.id === selectedProjectNumber);
+      const firstRunnableProject = projectResult.projects.find((project) => project.can_run);
       const projectId =
         projectOverride ??
-        selectedProjectNumber ??
+        (savedProject ? savedProject.id : undefined) ??
+        firstRunnableProject?.id ??
         (projectResult.projects.length ? projectResult.projects[0].id : undefined);
       if (projectId && !selectedProjectId) {
         setSelectedProjectId(String(projectId));
         window.localStorage.setItem("codexFleetProjectId", String(projectId));
+      }
+      const activeProject = projectResult.projects.find((project) => project.id === projectId);
+      if (!activeProject?.can_run) {
+        setProjects(projectResult.projects);
+        setItems([]);
+        setRuns([]);
+        setAnalytics(null);
+        setMessage(activeProject?.status_message ?? "Project needs attention before it can run.");
+        return;
       }
       const [readyResult, runResult, analyticsResult, harnessResult] = await Promise.all([
         api().readyWorkItems(projectId),
@@ -289,7 +302,7 @@ export default function CodexFleetDashboard() {
               >
                 {projects.map((project) => (
                   <option key={project.id} value={project.id}>
-                    {project.name}
+                    {project.can_run ? project.name : `${project.name} - needs attention`}
                   </option>
                 ))}
               </select>
@@ -305,7 +318,7 @@ export default function CodexFleetDashboard() {
             <button
               type="button"
               className="h-10 rounded-md bg-cyan-300 px-4 text-sm font-semibold text-slate-950 disabled:opacity-50"
-              disabled={busy}
+              disabled={busy || (projects.length > 0 && !selectedProject?.can_run)}
               onClick={runNext}
             >
               Run Ready
@@ -476,9 +489,12 @@ export default function CodexFleetDashboard() {
                 <div key={project.id} className="rounded-md border border-white/10 bg-black/20 p-3">
                   <div className="flex items-center justify-between gap-3">
                     <span className="font-medium">{project.name}</span>
-                    <span className="text-xs text-slate-300">{project.harness_status}</span>
+                    <ProjectStatusBadge project={project} />
                   </div>
                   <p className="mt-2 break-all text-xs text-slate-400">{project.repo_path}</p>
+                  <p className={project.can_run ? "mt-2 text-xs text-emerald-100" : "mt-2 text-xs text-amber-100"}>
+                    {project.status_message}
+                  </p>
                   <HarnessSummary harness={projectHarness[project.id]} fallbackStatus={project.harness_status} />
                   <div className="mt-3 flex flex-wrap gap-2">
                     <button
@@ -496,7 +512,7 @@ export default function CodexFleetDashboard() {
                     <button
                       type="button"
                       className="h-8 rounded-md border border-white/10 px-3 text-xs font-semibold text-white disabled:opacity-50"
-                      disabled={busy}
+                      disabled={busy || !project.can_run}
                       onClick={() => scanProjectHarness(project)}
                     >
                       Scan
@@ -504,7 +520,7 @@ export default function CodexFleetDashboard() {
                     <button
                       type="button"
                       className="h-8 rounded-md border border-white/10 px-3 text-xs font-semibold text-white disabled:opacity-50"
-                      disabled={busy || projectHarness[project.id]?.status === "blocked"}
+                      disabled={busy || !project.can_run || projectHarness[project.id]?.status === "blocked"}
                       onClick={() => applyProjectHarness(project)}
                     >
                       Apply Harness
@@ -725,6 +741,22 @@ function HarnessSummary({ harness, fallbackStatus }: { harness?: CodexFleetHarne
       ) : null}
     </div>
   );
+}
+
+function ProjectStatusBadge({ project }: { project: CodexFleetProject }) {
+  const text = project.can_run
+    ? project.plane_status === "created"
+      ? "restored"
+      : project.plane_status === "relinked"
+        ? "relinked"
+        : project.harness_status
+    : project.path_status === "missing_folder"
+      ? "folder missing"
+      : project.path_status === "not_git"
+        ? "not git"
+        : "needs attention";
+  const tone = project.can_run ? "default" : "warn";
+  return <Badge text={text} tone={tone} />;
 }
 
 function Badge({ text, tone = "default" }: { text: string; tone?: "default" | "warn" }) {

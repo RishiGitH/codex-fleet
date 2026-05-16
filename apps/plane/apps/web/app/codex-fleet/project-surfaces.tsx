@@ -695,7 +695,8 @@ function ConfigureCodexPanel({ projectId, state, onConfigured }: { projectId: st
     }
   };
 
-  const reconnectTarget = typeof window === "undefined" ? "codex-fleet/projects/" : window.location.pathname.replace(/^\/+/, "");
+  const reconnectTarget =
+    typeof window === "undefined" ? "codex-fleet/dashboard" : window.location.pathname.replace(/^\/+/, "");
 
   return (
     <section className="rounded-lg border border-custom-primary-100/40 bg-custom-primary-100/10 p-5">

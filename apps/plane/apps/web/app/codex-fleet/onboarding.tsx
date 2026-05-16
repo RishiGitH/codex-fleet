@@ -69,7 +69,7 @@ export default function CodexFleetOnboarding() {
     }
   };
 
-  const dashboardUrl = `/codex-fleet/projects/#${new URLSearchParams({
+  const dashboardUrl = `/codex-fleet/dashboard#${new URLSearchParams({
     apiUrl: apiUrl.trim() || "http://127.0.0.1:18790",
     token: token.trim(),
   }).toString()}`;

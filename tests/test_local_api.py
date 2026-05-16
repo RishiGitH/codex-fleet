@@ -12,6 +12,7 @@ from urllib.request import Request, urlopen
 import pytest
 
 import codex_fleet.local_api as local_api
+import codex_fleet.project_reconcile as project_reconcile
 from codex_fleet.config import FleetConfig, TrackerConfig
 from codex_fleet.factory import default_store_path
 from codex_fleet.local_api import (
@@ -65,6 +66,10 @@ def test_local_api_status_and_project_registration(tmp_path: Path) -> None:
         projects = _json_request(f"{base_url}/api/projects", token=server.token)
         project = _json_request(f"{base_url}/api/projects/{created['project']['id']}", token=server.token)
         assert projects["projects"][0]["repo_path"] == str(project_dir.resolve())
+        assert projects["projects"][0]["path_status"] == "ok"
+        assert projects["projects"][0]["plane_status"] in {"linked", "skipped"}
+        assert isinstance(projects["projects"][0]["status_message"], str)
+        assert projects["projects"][0]["can_run"] in {True, False}
         assert project["project"]["repo_path"] == str(project_dir.resolve())
     finally:
         server.shutdown()
@@ -356,6 +361,12 @@ def test_local_api_project_registration_links_plane_project(tmp_path: Path, monk
             assert external_id == str(project_dir.resolve())
             return {"id": "plane-project-id"}
 
+        def list_projects(self) -> list[dict[str, object]]:
+            return []
+
+        def join_projects(self, project_ids: list[str]) -> None:
+            raise AssertionError(f"unexpected join: {project_ids}")
+
         def list_labels(self) -> list[dict[str, str]]:
             return []
 
@@ -366,7 +377,7 @@ def test_local_api_project_registration_links_plane_project(tmp_path: Path, monk
         created_states = ("Ready", "Running")
 
     monkeypatch.setattr(
-        local_api,
+        project_reconcile,
         "load_config",
         lambda repo: FleetConfig(
             repo=tmp_path,
@@ -379,10 +390,10 @@ def test_local_api_project_registration_links_plane_project(tmp_path: Path, monk
             ),
         ).resolved(),
     )
-    monkeypatch.setattr(local_api, "build_plane_client", lambda config: FakePlaneClient())
-    monkeypatch.setattr(local_api, "ensure_plane_states", lambda client, active_states: FakeStateResult())
-    monkeypatch.setattr(local_api, "ensure_plane_labels", lambda client: ("human-requested", "agent-proposed", "agent-followup"))
-    monkeypatch.setattr(local_api, "write_plane_tracker_config", lambda repo, **kwargs: writes.append({"repo": repo, **kwargs}))
+    monkeypatch.setattr(project_reconcile, "build_plane_client", lambda config: FakePlaneClient())
+    monkeypatch.setattr(project_reconcile, "ensure_plane_states", lambda client, active_states: FakeStateResult())
+    monkeypatch.setattr(project_reconcile, "ensure_plane_labels", lambda client: ("human-requested", "agent-proposed", "agent-followup"))
+    monkeypatch.setattr(project_reconcile, "write_plane_tracker_config", lambda repo, **kwargs: writes.append({"repo": repo, **kwargs}))
 
     server = create_local_api_server(tmp_path, port=0)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -396,7 +407,7 @@ def test_local_api_project_registration_links_plane_project(tmp_path: Path, monk
             payload={"path": str(project_dir)},
         )
 
-        assert created["plane"]["status"] == "linked"
+        assert created["plane"]["status"] == "created"
         assert created["plane"]["project_id"] == "plane-project-id"
         assert set(created["plane"]["created_labels"]) == {"human-requested", "agent-proposed", "agent-followup"}
         assert created["project"]["plane_workspace_slug"] == "codex-local"
@@ -1448,8 +1459,17 @@ def test_local_api_configures_existing_repo_for_plane_project(tmp_path: Path, mo
         def create_state(self, name: str, group: str, color: str) -> dict[str, str]:
             return {"id": name, "name": name, "group": group, "color": color}
 
+        def list_projects(self) -> list[dict[str, object]]:
+            return [{"id": "visible-plane-project", "is_member": True}]
+
+        def ensure_project(self, *, name: str, identifier_seed: str, external_id: str) -> dict[str, str]:
+            raise AssertionError("existing Plane project should be reused")
+
+        def join_projects(self, project_ids: list[str]) -> None:
+            raise AssertionError(f"unexpected join: {project_ids}")
+
     monkeypatch.setattr(
-        local_api,
+        project_reconcile,
         "load_config",
         lambda repo: FleetConfig(
             repo=tmp_path,
@@ -1462,10 +1482,10 @@ def test_local_api_configures_existing_repo_for_plane_project(tmp_path: Path, mo
             ),
         ).resolved(),
     )
-    monkeypatch.setattr(local_api, "build_plane_client", lambda config: FakePlaneClient())
-    monkeypatch.setattr(local_api, "ensure_plane_states", lambda client, active_states: FakeStateResult())
-    monkeypatch.setattr(local_api, "ensure_plane_labels", lambda client: ("human-requested",))
-    monkeypatch.setattr(local_api, "write_plane_tracker_config", lambda repo, **kwargs: None)
+    monkeypatch.setattr(project_reconcile, "build_plane_client", lambda config: FakePlaneClient())
+    monkeypatch.setattr(project_reconcile, "ensure_plane_states", lambda client, active_states: FakeStateResult())
+    monkeypatch.setattr(project_reconcile, "ensure_plane_labels", lambda client: ("human-requested",))
+    monkeypatch.setattr(project_reconcile, "write_plane_tracker_config", lambda repo, **kwargs: None)
     monkeypatch.setattr(local_api, "_comment_plane_project_configured", lambda server, project, setup_log: None)
 
     server = create_local_api_server(tmp_path, port=0)

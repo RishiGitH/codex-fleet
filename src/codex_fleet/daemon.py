@@ -12,9 +12,10 @@ from codex_fleet.execution_settings import (
     merged_work_item_settings,
     settings_value,
 )
-from codex_fleet.factory import build_plane_client, build_runner, build_tracker, default_store_path
+from codex_fleet.factory import build_runner, build_tracker, default_store_path
 from codex_fleet.models import RunStatus, WorkItem, WorkItemState
 from codex_fleet.orchestrator import Orchestrator, OrchestratorResult
+from codex_fleet.project_reconcile import reconcile_project
 from codex_fleet.project_registry import (
     LocalProject,
     ProjectRegistry,
@@ -509,11 +510,23 @@ class MultiProjectFleetDaemon:
         if self.config.tracker.plane_workspace_slug and self.config.tracker.plane_project_id:
             seen_plane_projects.add((self.config.tracker.plane_workspace_slug, self.config.tracker.plane_project_id))
         self._config_errors = []
-        memberships = self._plane_project_memberships()
 
         for project in sorted(projects, key=lambda registered: registered.id, reverse=True):
             repo = project.repo_path.expanduser().absolute()
-            if repo in seen or not project.plane_workspace_slug or not project.plane_project_id:
+            if repo in seen:
+                continue
+            reconciliation = reconcile_project(
+                self.config.repo,
+                self.registry,
+                project,
+                control_config=self.config,
+                allow_bootstrap=False,
+            )
+            project = reconciliation.project
+            if not reconciliation.can_run:
+                self._config_errors.append(ProjectDaemonError(repo=repo, message=reconciliation.status_message))
+                continue
+            if not project.plane_workspace_slug or not project.plane_project_id:
                 continue
             plane_key = (project.plane_workspace_slug, project.plane_project_id)
             if plane_key in seen_plane_projects:
@@ -522,14 +535,6 @@ class MultiProjectFleetDaemon:
             current_git_root = discover_git_root(repo)
             if current_git_root is None:
                 self._config_errors.append(ProjectDaemonError(repo=repo, message="Registered project is not a git repository. Re-link it or create a new project."))
-                continue
-            if memberships.get(project.plane_project_id) is False:
-                self._config_errors.append(
-                    ProjectDaemonError(
-                        repo=repo,
-                        message=f"Current Plane user is not a member of project {project.plane_project_id}. Open the project card and click Join, or recreate/link the project.",
-                    )
-                )
                 continue
             try:
                 project_config = self._load_registered_project_config(project)
@@ -568,13 +573,3 @@ class MultiProjectFleetDaemon:
             codex=self.config.codex.model_copy(deep=True),
             token=self.config.token.model_copy(deep=True),
         ).resolved()
-
-    def _plane_project_memberships(self) -> dict[str, bool]:
-        if self.config.tracker.kind != "plane":
-            return {}
-        try:
-            projects = build_plane_client(self.config).list_projects()
-        except Exception as exc:  # noqa: BLE001 - membership repair is best-effort and visible.
-            self._config_errors.append(ProjectDaemonError(repo=self.config.repo, message=f"Could not inspect Plane project membership: {exc}"))
-            return {}
-        return {str(project.get("id")): bool(project.get("is_member", True)) for project in projects if project.get("id")}

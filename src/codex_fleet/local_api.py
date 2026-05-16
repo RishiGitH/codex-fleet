@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
-from codex_fleet.config import load_config, write_plane_tracker_config
+from codex_fleet.config import load_config
 from codex_fleet.execution_settings import (
     config_with_codex_settings,
     merged_work_item_settings,
@@ -29,14 +29,18 @@ from codex_fleet.local_work_items import (
 )
 from codex_fleet.models import RunStatus, WorkItem, WorkItemState
 from codex_fleet.orchestrator import Orchestrator
-from codex_fleet.plane import PlaneClient, PlaneSettings, plane_project_external_id
-from codex_fleet.plane_bootstrap import ensure_plane_labels, ensure_plane_states
 from codex_fleet.plane_local_bootstrap import (
     PlaneLocalBootstrapError,
-    bootstrap_local_plane,
     create_local_plane_session,
 )
 from codex_fleet.plane_manager import DEFAULT_PLANE_URL
+from codex_fleet.project_reconcile import (
+    ProjectReconciliation,
+    load_or_bootstrap_plane_config,
+    project_path_status,
+    reconcile_project,
+    reconcile_registered_projects,
+)
 from codex_fleet.project_registry import (
     DEFAULT_CODEX_SETTINGS,
     LocalProject,
@@ -288,7 +292,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/plane/connect":
             query = parse_qs(parsed.query)
-            redirect_path = query.get("redirect_path", ["codex-fleet/projects/"])[0]
+            redirect_path = query.get("redirect_path", ["codex-fleet/dashboard"])[0]
             safe_redirect_path = _safe_relative_plane_path(redirect_path)
             if safe_redirect_path is None:
                 self._send_error(HTTPStatus.BAD_REQUEST, "Redirect path must be a relative local Plane path.", code="bad_request")
@@ -337,11 +341,15 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_auth_missing()
                 return
             try:
-                projects = self.server.registry.list_projects()
+                reconciled = reconcile_registered_projects(
+                    self.server.repo,
+                    self.server.registry,
+                    allow_bootstrap=False,
+                )
             except ProjectRegistryError as exc:
                 self._send_error(HTTPStatus.BAD_REQUEST, str(exc), code="stale_runtime_state")
                 return
-            self._send_json({"projects": [_project_payload(project) for project in projects]})
+            self._send_json({"projects": [_project_payload(item.project, item) for item in reconciled]})
             return
         if path.startswith("/api/projects/") and (path.endswith("/settings") or path.endswith("/fleet-settings")):
             if not self._authorized():
@@ -1191,11 +1199,22 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
 
-def _project_payload(project: LocalProject) -> dict[str, Any]:
+def _project_payload(project: LocalProject, reconciliation: ProjectReconciliation | None = None) -> dict[str, Any]:
     payload: dict[str, Any] = asdict(project)
     payload["repo_path"] = str(payload["repo_path"])
     if payload["git_root"] is not None:
         payload["git_root"] = str(payload["git_root"])
+    if reconciliation is None:
+        path_status = project_path_status(project)
+        payload["path_status"] = path_status
+        payload["plane_status"] = "linked" if project.plane_project_id and path_status == "ok" else "skipped"
+        payload["status_message"] = "Project is linked and ready." if payload["plane_status"] == "linked" else "Project needs attention."
+        payload["can_run"] = bool(project.plane_project_id and path_status == "ok")
+    else:
+        payload["path_status"] = reconciliation.path_status
+        payload["plane_status"] = reconciliation.plane_status
+        payload["status_message"] = reconciliation.status_message
+        payload["can_run"] = reconciliation.can_run
     return payload
 
 
@@ -1226,67 +1245,9 @@ def _safe_loopback_origin(origin: str) -> bool:
     return parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
 
 
-def _ensure_plane_project_mapping(server: LocalApiServer, project: LocalProject) -> tuple[LocalProject, dict[str, Any]]:
-    try:
-        control_config = _load_or_bootstrap_plane_config(server.repo)
-    except Exception as exc:
-        return project, {"status": "skipped", "reason": f"control config unavailable: {exc}"}
-    if control_config.tracker.kind != "plane":
-        return project, {"status": "skipped", "reason": "control repo is not Plane-backed"}
-
-    try:
-        control_client = build_plane_client(control_config)
-    except ValueError as exc:
-        return project, {"status": "skipped", "reason": str(exc)}
-
-    workspace_slug = control_client.settings.workspace_slug
-    base_url = control_client.settings.base_url
-    api_key = control_client.settings.api_key
-
-    try:
-        plane_project_id = project.plane_project_id
-        if project.repo_path == control_config.repo and control_client.settings.project_id:
-            plane_project_id = control_client.settings.project_id
-        elif not plane_project_id:
-            plane_project = control_client.ensure_project(
-                name=project.name,
-                identifier_seed=project.slug,
-                external_id=plane_project_external_id(project.repo_path),
-            )
-            plane_project_id = str(plane_project["id"])
-
-        mapped = server.registry.update_plane_mapping(
-            project.id,
-            workspace_slug=workspace_slug,
-            project_id_in_plane=plane_project_id,
-        )
-        project_client = PlaneClient(
-            PlaneSettings(
-                base_url=base_url,
-                api_key=api_key,
-                workspace_slug=workspace_slug,
-                project_id=plane_project_id,
-            )
-        )
-        state_result = ensure_plane_states(project_client, control_config.tracker.active_states)
-        created_labels = ensure_plane_labels(project_client)
-        write_plane_tracker_config(
-            mapped.repo_path,
-            base_url=base_url,
-            workspace_slug=workspace_slug,
-            project_id=plane_project_id,
-            api_key_value=api_key,
-        )
-        return mapped, {
-            "status": "linked",
-            "workspace_slug": workspace_slug,
-            "project_id": plane_project_id,
-            "created_states": list(state_result.created_states),
-            "created_labels": list(created_labels),
-            "config_path": str(mapped.repo_path / ".codex-fleet.yml"),
-        }
-    except Exception as exc:
-        return project, {"status": "error", "reason": str(exc)}
+def _ensure_plane_project_mapping(server: LocalApiServer, project: LocalProject) -> tuple[LocalProject, dict[str, object]]:
+    reconciliation = reconcile_project(server.repo, server.registry, project)
+    return reconciliation.project, reconciliation.plane_payload()
 
 
 def _configure_codex_for_plane_project(server: LocalApiServer, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1296,7 +1257,7 @@ def _configure_codex_for_plane_project(server: LocalApiServer, payload: dict[str
     plane_project_id = plane_project_id.strip()
 
     try:
-        control_config = _load_or_bootstrap_plane_config(server.repo)
+        control_config = load_or_bootstrap_plane_config(server.repo)
     except Exception as exc:
         raise ProjectRegistryError(f"Control repo config unavailable: {exc}") from exc
     if control_config.tracker.kind != "plane":
@@ -1373,21 +1334,6 @@ def _comment_plane_project_configured(server: LocalApiServer, project: LocalProj
                 return
     except Exception as exc:  # noqa: BLE001 - setup should succeed even if a comment cannot be added.
         print(f"codex-fleet API: project configured but comment skipped: {exc}", file=sys.stderr, flush=True)
-
-
-def _load_or_bootstrap_plane_config(repo: Path) -> Any:
-    config = load_config(repo)
-    if config.tracker.kind == "plane":
-        return config
-    result = bootstrap_local_plane(repo)
-    write_plane_tracker_config(
-        repo,
-        base_url=DEFAULT_PLANE_URL,
-        workspace_slug=result.workspace_slug,
-        project_id=result.project_id,
-        api_key_value=result.api_key,
-    )
-    return load_config(repo)
 
 
 def _create_starter_project(payload: dict[str, Any]) -> Path:

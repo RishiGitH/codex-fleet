@@ -193,7 +193,7 @@ def verify_plane_customization(repo: Path, source_dir: Path | None = None) -> Pl
             "home_github_link_target",
         ),
         _check_contains(root / "apps/web/app/(home)/page.tsx", "Open project dashboard", "home_projects_button"),
-        _check_contains(root / "apps/web/app/(home)/page.tsx", "/codex-fleet/projects/", "home_projects_link"),
+        _check_contains(root / "apps/web/app/(home)/page.tsx", "/codex-fleet/dashboard", "home_projects_link"),
         _check_contains(root / "apps/web/app/(home)/page.tsx", "Connection setup", "home_connection_setup_fallback"),
         _check_contains(
             root / "apps/web/app/(home)/page.tsx",
@@ -204,6 +204,41 @@ def verify_plane_customization(repo: Path, source_dir: Path | None = None) -> Pl
         _check_not_contains(root / "apps/web/app/(home)/page.tsx", "Plane", "home_hides_plane_branding"),
         _check_not_contains(root / "apps/web/app/root.tsx", "Plane-based", "root_description_hides_plane_branding"),
         _check_not_contains(root / "apps/web/app/layout.tsx", "Plane-based", "layout_description_hides_plane_branding"),
+        _check_contains(
+            root / "apps/web/core/lib/wrappers/instance-wrapper.tsx",
+            'startsWith("/codex-fleet")',
+            "first_run_allows_codex_fleet_routes",
+        ),
+        _check_contains(
+            root / "apps/web/core/components/instance/not-ready-view.tsx",
+            "Open Codex Fleet",
+            "first_run_codex_fleet_action",
+        ),
+        _check_contains(
+            root / "apps/web/core/components/instance/not-ready-view.tsx",
+            "/codex-fleet/dashboard",
+            "first_run_dashboard_link",
+        ),
+        _check_contains(
+            root / "apps/web/core/components/instance/not-ready-view.tsx",
+            "/codex-fleet/onboarding",
+            "first_run_onboarding_link",
+        ),
+        _check_not_contains(
+            root / "apps/web/core/components/instance/not-ready-view.tsx",
+            "Welcome to Plane",
+            "first_run_hides_plane_welcome",
+        ),
+        _check_not_contains(
+            root / "apps/web/core/components/instance/not-ready-view.tsx",
+            "PlaneLockup",
+            "first_run_hides_plane_logo",
+        ),
+        _check_not_contains(
+            root / "apps/web/core/components/instance/not-ready-view.tsx",
+            "GOD_MODE_URL",
+            "first_run_avoids_stock_setup_route",
+        ),
         _check_contains(root / "apps/web/app/routes/extended.ts", "codex-fleet/onboarding", "onboarding_route"),
         _check_contains(root / "apps/web/app/routes/extended.ts", "codex-fleet/dashboard", "dashboard_route"),
         _check_contains(

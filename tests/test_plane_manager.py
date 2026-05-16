@@ -365,9 +365,15 @@ def test_verify_plane_customization_reports_required_branding(tmp_path: Path) ->
     (root / "AGENTS.md").write_text("Plane must not shell out\n")
     (root / "apps/web/app/root.tsx").write_text("codex-fleet\n")
     (root / "apps/web/app/layout.tsx").write_text("codex-fleet\n")
+    (root / "apps/web/core/components/instance").mkdir(parents=True)
+    (root / "apps/web/core/components/instance/not-ready-view.tsx").write_text(
+        "codex-fleet\nOpen Codex Fleet\n/codex-fleet/dashboard\n/codex-fleet/onboarding\n"
+    )
+    (root / "apps/web/core/lib/wrappers").mkdir(parents=True)
+    (root / "apps/web/core/lib/wrappers/instance-wrapper.tsx").write_text('startsWith("/codex-fleet")\n')
     (root / "apps/web/app/(home)").mkdir(parents=True)
     (root / "apps/web/app/(home)/page.tsx").write_text(
-        "codex-fleet Star us on GitHub https://github.com/RishiGitH/codex-fleet Open project dashboard /codex-fleet/projects/ Connection setup Add or create projects from the dashboard's Add Project button\n"
+        "codex-fleet Star us on GitHub https://github.com/RishiGitH/codex-fleet Open project dashboard /codex-fleet/dashboard Connection setup Add or create projects from the dashboard's Add Project button\n"
     )
     (root / "apps/web/app/(all)/[workspaceSlug]/(projects)").mkdir(parents=True)
     (root / "apps/web/app/(all)/[workspaceSlug]/(projects)/star-us-link.tsx").write_text(

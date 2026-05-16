@@ -128,8 +128,8 @@ export const CreateProjectForm = observer(function CreateProjectForm(props: TCre
     });
 
   const currentReconnectPath = () => {
-    if (typeof window === "undefined") return "codex-fleet/projects/";
-    return `${window.location.pathname}${window.location.search}`.replace(/^\/+/, "") || "codex-fleet/projects/";
+    if (typeof window === "undefined") return "codex-fleet/dashboard";
+    return `${window.location.pathname}${window.location.search}`.replace(/^\/+/, "") || "codex-fleet/dashboard";
   };
 
   const reconnectCodexFleet = () => {

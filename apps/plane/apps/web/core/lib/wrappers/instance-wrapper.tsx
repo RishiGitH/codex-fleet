@@ -6,6 +6,7 @@
 
 import type { ReactNode } from "react";
 import { observer } from "mobx-react";
+import { useLocation } from "react-router";
 import useSWR from "swr";
 // components
 import { LogoSpinner } from "@/components/common/logo-spinner";
@@ -19,8 +20,10 @@ type TInstanceWrapper = {
 
 const InstanceWrapper = observer(function InstanceWrapper(props: TInstanceWrapper) {
   const { children } = props;
+  const location = useLocation();
   // store
   const { isLoading, instance, error, fetchInstanceInfo } = useInstance();
+  const isCodexFleetRoute = location.pathname.startsWith("/codex-fleet");
 
   const { isLoading: isInstanceSWRLoading, error: instanceSWRError } = useSWR(
     "INSTANCE_INFORMATION",
@@ -42,7 +45,7 @@ const InstanceWrapper = observer(function InstanceWrapper(props: TInstanceWrappe
   if (error && error?.status === "error") return <>{children}</>;
 
   // instance is not ready and setup is not done
-  if (instance?.is_setup_done === false) return <InstanceNotReady />;
+  if (instance?.is_setup_done === false && !isCodexFleetRoute) return <InstanceNotReady />;
 
   return <>{children}</>;
 });

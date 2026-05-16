@@ -69,6 +69,7 @@ from codex_fleet.plane_preview import (
 )
 from codex_fleet.plane_views import PlaneViewBootstrapError, ensure_local_plane_project_views
 from codex_fleet.pr_flow import PrRequest, create_draft_pr
+from codex_fleet.project_reconcile import ProjectReconciliation, reconcile_registered_projects
 from codex_fleet.project_registry import ProjectRegistry, default_project_registry_path
 from codex_fleet.runner import FakeRunner
 from codex_fleet.store import RunStore
@@ -638,7 +639,7 @@ def open_cmd(repo: Path, plane_url: str, project_path: Path | None, dashboard: b
             repo,
             api_url=api_url,
             plane_url=plane_url,
-            redirect_path="codex-fleet/projects/",
+            redirect_path="codex-fleet/dashboard",
         )
     else:
         url = build_onboarding_url(repo, plane_url=plane_url, project_path=project_path)
@@ -794,6 +795,13 @@ def up(repo: Path, fake: bool, fake_fail: bool, once: bool, sleep_seconds: float
             console.print(
                 f"Plane saved views: {len(view_result.created)} created, {len(view_result.existing)} existing"
             )
+        reconciled = reconcile_registered_projects(
+            config.repo,
+            ProjectRegistry(default_project_registry_path(config.repo)),
+            control_config=config,
+            allow_bootstrap=False,
+        )
+        _print_project_reconciliation_summary(reconciled)
     report = scan_repo(config.repo, codex_command=config.codex.command)
     console.print(render_report(report))
     console.print(f"Tracker: {config.tracker.kind}")
@@ -1025,6 +1033,8 @@ def _plane_frontend_build_is_stale(repo: Path, build_dir: Path) -> bool:
         source_root / "app" / "(all)" / "[workspaceSlug]" / "(projects)" / "projects" / "(detail)" / "[projectId]" / "artifacts",
         source_root / "app" / "(all)" / "[workspaceSlug]" / "(projects)" / "projects" / "(detail)" / "[projectId]" / "codex-settings",
         source_root / "ce" / "components" / "projects" / "create",
+        source_root / "core" / "components" / "instance",
+        source_root / "core" / "lib" / "wrappers" / "instance-wrapper.tsx",
         source_root / "core" / "components" / "issues" / "issue-modal",
         source_root / "components" / "codex-fleet",
     ]
@@ -1036,6 +1046,19 @@ def _plane_frontend_build_is_stale(repo: Path, build_dir: Path) -> bool:
                 if child.is_file() and child.suffix in {".ts", ".tsx", ".css", ".js", ".jsx"} and child.stat().st_mtime > build_mtime:
                     return True
     return False
+
+
+def _print_project_reconciliation_summary(results: list[ProjectReconciliation]) -> None:
+    if not results:
+        return
+    ready = sum(1 for result in results if result.can_run)
+    relinked = sum(1 for result in results if result.plane_status == "relinked")
+    created = sum(1 for result in results if result.plane_status == "created")
+    needs_attention = sum(1 for result in results if not result.can_run)
+    console.print(
+        "Projects restored: "
+        f"{ready} ready, {relinked} relinked, {created} recreated, {needs_attention} need attention"
+    )
 
 
 def _is_loopback_url(url: str) -> bool:

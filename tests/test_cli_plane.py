@@ -779,7 +779,7 @@ def test_open_dashboard_prints_connected_login_url(tmp_path: Path) -> None:
     assert parsed.path == "/api/plane/login"
     assert query["nonce"][0]
     assert redirect.netloc == "127.0.0.1:17300"
-    assert redirect.path == "/codex-fleet/projects/"
+    assert redirect.path == "/codex-fleet/dashboard"
     assert redirect_fragment["apiUrl"] == ["http://127.0.0.1:18790"]
     assert "token=" not in printed
 
