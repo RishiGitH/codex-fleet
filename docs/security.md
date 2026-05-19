@@ -8,7 +8,7 @@ codex-fleet runs coding agents against real repositories. Treat it as powerful l
 - No deploy.
 - No broad filesystem mounts.
 - No secrets in prompts.
-- Human Review before merge.
+- Parent tasks move to Done automatically only in `full_auto` after required children and reviewers pass.
 - Workspace-write is preferred over full access.
 
 ## Sensitive areas
@@ -27,6 +27,8 @@ All workspace paths must resolve under the configured workspace root. Never acce
 
 Local project paths must be validated before registration. The local API accepts folder paths as project inputs, but it must reject missing paths, non-directories, and filesystem root.
 
+Project creation receives a parent folder and creates one child project folder inside it. Existing empty target folders may be reused; non-empty target folders are rejected unless the user chooses a different folder name.
+
 ## Local API
 
 The customized Plane UI talks to codex-fleet through a loopback-only API.
@@ -38,6 +40,7 @@ The customized Plane UI talks to codex-fleet through a loopback-only API.
 - Expose structured operations only.
 - Do not expose an arbitrary shell command endpoint.
 - Plane UI may request a run; codex-fleet must create worktrees and run Codex.
+- Plane UI may request delivery task creation; codex-fleet must not push, merge, deploy, or create PRs by default.
 
 ## Local Plane frontend
 

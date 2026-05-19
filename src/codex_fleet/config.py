@@ -30,10 +30,12 @@ class WorkspaceConfig(BaseModel):
 
 
 class CodexConfig(BaseModel):
-    runner: Literal["cli", "app-server"] = "cli"
-    command: str = "codex exec"
-    approval_policy: str = "on-request"
+    runner: Literal["cli", "app-server"] = "app-server"
+    command: str = "codex app-server"
+    approval_policy: str = "never"
     sandbox_mode: str = "workspace-write"
+    model: str | None = None
+    reasoning_effort: str | None = None
     turn_timeout_ms: int = 3_600_000
     stall_timeout_ms: int = 300_000
     stream_logs: bool = True
@@ -117,10 +119,12 @@ def write_default_config(repo: Path, path: Path | None = None) -> Path:
         "workspace:\n"
         "  root: .codex-fleet/workspaces\n"
         "codex:\n"
-        "  runner: cli\n"
-        "  command: codex exec\n"
-        "  approval_policy: on-request\n"
+        "  runner: app-server\n"
+        "  command: codex app-server\n"
+        "  approval_policy: never\n"
         "  sandbox_mode: workspace-write\n"
+        "  model: gpt-5.5\n"
+        "  reasoning_effort: low\n"
         "  stream_logs: true\n"
         "token:\n"
         "  default_doc_limit: 8000\n"
@@ -147,6 +151,7 @@ def write_plane_tracker_config(
     project_id: str,
     api_key_ref: str = "$PLANE_API_KEY",
     api_key_value: str | None = None,
+    codex_settings: dict[str, Any] | None = None,
 ) -> Path:
     repo = repo.expanduser().absolute()
     target = default_config_path(repo)
@@ -176,18 +181,26 @@ def write_plane_tracker_config(
     raw.setdefault("repo", ".")
     raw.setdefault("agent", {"max_concurrent_agents": 1})
     raw.setdefault("workspace", {"root": ".codex-fleet/workspaces"})
-    raw.setdefault(
-        "codex",
-        {
-            "runner": "cli",
-            "command": "codex exec",
-            "approval_policy": "on-request",
-            "sandbox_mode": "workspace-write",
-            "turn_timeout_ms": 3_600_000,
-            "stall_timeout_ms": 300_000,
-            "stream_logs": True,
-        },
-    )
+    codex = raw.get("codex")
+    if not isinstance(codex, dict):
+        codex = {}
+    codex.setdefault("runner", "app-server")
+    codex.setdefault("command", "codex app-server")
+    codex.setdefault("approval_policy", "never")
+    codex.setdefault("sandbox_mode", "workspace-write")
+    codex.setdefault("model", "gpt-5.5")
+    codex.setdefault("reasoning_effort", "low")
+    codex.setdefault("turn_timeout_ms", 3_600_000)
+    codex.setdefault("stall_timeout_ms", 300_000)
+    codex.setdefault("stream_logs", True)
+    agent = raw.get("agent")
+    if not isinstance(agent, dict):
+        agent = {}
+    agent.setdefault("max_concurrent_agents", 1)
+    if codex_settings:
+        _apply_codex_settings_to_raw_config(codex, agent, codex_settings)
+    raw["agent"] = agent
+    raw["codex"] = codex
     raw.setdefault(
         "token",
         {
@@ -210,6 +223,31 @@ def write_plane_tracker_config(
     if api_key_ref == "$PLANE_API_KEY" and api_key_value:
         write_local_secret(repo, "PLANE_API_KEY", api_key_value)
     return target
+
+
+def _apply_codex_settings_to_raw_config(codex: dict[str, Any], agent: dict[str, Any], settings: dict[str, Any]) -> None:
+    codex["runner"] = "app-server"
+    command = settings.get("command")
+    codex["command"] = command if isinstance(command, str) and command.strip() else "codex app-server"
+
+    key_map = {
+        "approval_policy": "approval_policy",
+        "sandbox_mode": "sandbox_mode",
+        "default_model": "model",
+        "reasoning_effort": "reasoning_effort",
+    }
+    for source_key, target_key in key_map.items():
+        value = settings.get(source_key)
+        if isinstance(value, str) and value.strip():
+            codex[target_key] = value.strip()
+
+    timeout_seconds = settings.get("job_timeout_seconds")
+    if isinstance(timeout_seconds, int) and timeout_seconds > 0:
+        codex["turn_timeout_ms"] = timeout_seconds * 1000
+
+    max_agents = settings.get("max_parallel_agents")
+    if isinstance(max_agents, int) and max_agents > 0:
+        agent["max_concurrent_agents"] = max_agents
 
 
 def write_local_secret(repo: Path, key: str, value: str) -> Path:

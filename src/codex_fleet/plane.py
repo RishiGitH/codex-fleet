@@ -3,12 +3,15 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime
+from html import unescape
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
 import httpx
 
-from codex_fleet.models import WorkItem
+from codex_fleet.models import WorkItem, WorkItemComment
 from codex_fleet.tracker import Tracker, TrackerError
 
 
@@ -209,6 +212,17 @@ class PlaneClient:
         with httpx.Client(timeout=self.timeout) as client:
             self._request_with_backoff(client, "POST", self._url(path), json={"comment_html": body})
 
+    def list_work_item_comments(self, item_id: str) -> list[WorkItemComment]:
+        path = self._project_path(f"work-items/{item_id}/comments/")
+        payload = self._get_json(path)
+        if isinstance(payload, dict) and isinstance(payload.get("results"), list):
+            raw_comments = payload["results"]
+        elif isinstance(payload, list):
+            raw_comments = payload
+        else:
+            raise TrackerError(f"Unexpected Plane comments response: {type(payload).__name__}")
+        return [_normalize_plane_comment(raw) for raw in raw_comments if isinstance(raw, dict)]
+
     def _get_json(self, path: str) -> Any:
         with httpx.Client(timeout=self.timeout) as client:
             response = self._request_with_backoff(client, "GET", self._url(path))
@@ -234,10 +248,20 @@ class PlaneClient:
         return last_response
 
 
+def _codex_fleet_visible_state(state: str) -> str:
+    legacy_map = {
+        "blocked": "Needs Input",
+        "rework": "Needs Input",
+        "in progress": "Running",
+    }
+    return legacy_map.get(state.strip().lower(), state)
+
+
 def normalize_plane_item(raw: dict[str, Any]) -> WorkItem:
     project_identifier = str(raw.get("project_detail", {}).get("identifier") or raw.get("project_identifier") or "PLN")
     sequence = raw.get("sequence_id") or raw.get("identifier") or raw.get("id")
     state = raw.get("state_detail", {}).get("name") or raw.get("state", "Backlog")
+    state = _codex_fleet_visible_state(str(state))
     priority = _priority_to_int(raw.get("priority"))
     labels = tuple(_normalize_label(label) for label in raw.get("label_details", raw.get("labels", [])))
     return WorkItem(
@@ -245,7 +269,7 @@ def normalize_plane_item(raw: dict[str, Any]) -> WorkItem:
         identifier=f"{project_identifier}-{sequence}",
         title=str(raw.get("name") or raw.get("title") or "Untitled"),
         description=raw.get("description_stripped") or raw.get("description_html") or raw.get("description"),
-        state=str(state),
+        state=state,
         priority=priority,
         url=raw.get("url"),
         labels=labels,
@@ -319,6 +343,9 @@ class PlaneTracker(Tracker):
     def create_comment(self, item_id: str, body: str) -> None:
         self.client.create_work_item_comment(item_id, body)
 
+    def list_comments(self, item_id: str) -> list[WorkItemComment]:
+        return self.client.list_work_item_comments(item_id)
+
     def create_work_item(
         self,
         *,
@@ -355,3 +382,79 @@ class PlaneTracker(Tracker):
             if state.get("id") == state_id:
                 return {**raw, "state_detail": {"name": state.get("name"), "id": state_id}}
         return raw
+
+
+class _PlainTextHTMLParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.parts: list[str] = []
+
+    def handle_data(self, data: str) -> None:
+        if data:
+            self.parts.append(data)
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in {"br", "p", "div", "li"}:
+            self.parts.append("\n")
+
+    def text(self) -> str:
+        return re.sub(r"\n{3,}", "\n\n", unescape("".join(self.parts))).strip()
+
+
+def _strip_comment_html(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    parser = _PlainTextHTMLParser()
+    parser.feed(value)
+    text = parser.text()
+    return text or re.sub(r"<[^>]+>", "", unescape(value)).strip()
+
+
+def _parse_plane_datetime(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    raw = value.strip()
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _comment_author(raw: dict[str, Any]) -> str:
+    for key in ("actor_detail", "created_by_detail", "created_by", "actor"):
+        value = raw.get(key)
+        if isinstance(value, dict):
+            for name_key in ("display_name", "first_name", "username", "email", "name"):
+                name = value.get(name_key)
+                if isinstance(name, str) and name.strip():
+                    return name.strip()
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _normalize_plane_comment(raw: dict[str, Any]) -> WorkItemComment:
+    body = (
+        raw.get("comment_stripped")
+        or raw.get("comment_html")
+        or raw.get("comment")
+        or raw.get("body")
+        or raw.get("description")
+        or ""
+    )
+    text = str(body).strip() if raw.get("comment_stripped") else _strip_comment_html(body)
+    author = _comment_author(raw)
+    normalized_author = author.lower()
+    normalized_text = text.lower()
+    is_codex_fleet = (
+        "codex-fleet local" in normalized_author
+        or normalized_text.startswith("codex-fleet")
+        or "human answer for codex-fleet" in normalized_text
+    )
+    return WorkItemComment(
+        id=str(raw.get("id") or raw.get("comment_id") or ""),
+        author_display_name=author,
+        created_at=_parse_plane_datetime(raw.get("created_at") or raw.get("updated_at")),
+        body_text=text,
+        is_codex_fleet=is_codex_fleet,
+    )

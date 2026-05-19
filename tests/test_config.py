@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from codex_fleet.config import load_config, resolve_env_ref
+from codex_fleet.config import load_config, resolve_env_ref, write_plane_tracker_config
 
 
 def test_resolve_env_ref(monkeypatch) -> None:
@@ -57,3 +57,31 @@ def test_load_config_infers_legacy_app_server_runner(tmp_path: Path) -> None:
     config = load_config(tmp_path, config_path=config_path)
 
     assert config.codex.runner == "app-server"
+
+
+def test_write_plane_tracker_config_applies_codex_settings(tmp_path: Path) -> None:
+    write_plane_tracker_config(
+        tmp_path,
+        base_url="http://127.0.0.1:17880",
+        workspace_slug="codex-fleet",
+        project_id="project-1",
+        codex_settings={
+            "default_model": "gpt-5.4-mini",
+            "reasoning_effort": "high",
+            "approval_policy": "never",
+            "sandbox_mode": "workspace-write",
+            "max_parallel_agents": 5,
+            "job_timeout_seconds": 900,
+        },
+    )
+
+    config = load_config(tmp_path)
+
+    assert config.tracker.kind == "plane"
+    assert config.agent.max_concurrent_agents == 5
+    assert config.codex.runner == "app-server"
+    assert config.codex.command == "codex app-server"
+    assert config.codex.model == "gpt-5.4-mini"
+    assert config.codex.reasoning_effort == "high"
+    assert config.codex.approval_policy == "never"
+    assert config.codex.turn_timeout_ms == 900_000

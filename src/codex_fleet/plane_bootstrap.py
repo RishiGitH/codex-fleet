@@ -8,15 +8,12 @@ from codex_fleet.plane import PlaneClient
 
 REQUIRED_STATES: tuple[str, ...] = (
     "Backlog",
-    "Planning",
     "Ready",
+    "Planning",
     "Running",
     "Needs Input",
     "Human Review",
-    "Rework",
     "Done",
-    "Blocked",
-    "Cancelled",
 )
 
 STATE_GROUPS: dict[str, str] = {
@@ -26,10 +23,7 @@ STATE_GROUPS: dict[str, str] = {
     "Running": "started",
     "Needs Input": "started",
     "Human Review": "started",
-    "Rework": "started",
     "Done": "completed",
-    "Blocked": "cancelled",
-    "Cancelled": "cancelled",
 }
 
 STATE_COLORS: dict[str, str] = {
@@ -39,19 +33,21 @@ STATE_COLORS: dict[str, str] = {
     "Running": "#F59E0B",
     "Needs Input": "#EC4899",
     "Human Review": "#8B5CF6",
-    "Rework": "#EF4444",
     "Done": "#10B981",
-    "Blocked": "#111827",
-    "Cancelled": "#6B7280",
 }
 
 REQUIRED_LABELS: dict[str, str] = {
     "human-requested": "#3B82F6",
     "agent-proposed": "#F59E0B",
     "agent-followup": "#8B5CF6",
-    "agent-lead": "#14B8A6",
-    "agent-worker": "#3B82F6",
-    "agent-reviewer": "#8B5CF6",
+    "agent-orchestrator": "#14B8A6",
+    "agent-planner": "#0EA5E9",
+    "agent-code-scout": "#A855F7",
+    "agent-implementer": "#3B82F6",
+    "agent-harness-reviewer": "#F59E0B",
+    "agent-security-reviewer": "#EF4444",
+    "agent-token-reviewer": "#EC4899",
+    "agent-delivery-manager": "#64748B",
     "needs-input": "#EC4899",
 }
 

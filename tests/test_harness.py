@@ -10,7 +10,9 @@ def test_plan_harness_lists_missing_files(tmp_path: Path) -> None:
     missing = {str(file.path) for file in plan.missing}
 
     assert "AGENTS.md" in missing
+    assert "README.md" in missing
     assert "WORKFLOW.md" in missing
+    assert ".codex-fleet/project.json" in missing
     assert ".codex/config.toml" in missing
 
 
@@ -22,6 +24,7 @@ def test_apply_harness_writes_missing_files_without_overwriting(tmp_path: Path) 
 
     assert existing.read_text() == "custom\n"
     assert tmp_path / "WORKFLOW.md" in written
+    assert (tmp_path / ".codex-fleet" / "project.json").exists()
     assert (tmp_path / ".codex" / "config.toml").exists()
     assert (tmp_path / ".agents" / "skills" / "repo-harness-review" / "SKILL.md").exists()
 
@@ -53,6 +56,17 @@ def test_plan_harness_detects_node_commands(tmp_path: Path) -> None:
     assert plan.scan.typecheck_command == "pnpm typecheck"
     assert plan.scan.build_command == "pnpm build"
     assert plan.scan.dev_command == "pnpm dev"
+
+
+def test_harness_project_json_records_detected_commands(tmp_path: Path) -> None:
+    _init_git_repo(tmp_path)
+    (tmp_path / "package.json").write_text('{"scripts":{"test":"vitest"}}\n')
+
+    apply_harness(tmp_path)
+
+    data = (tmp_path / ".codex-fleet" / "project.json").read_text()
+    assert '"workflow_mode": "plan_execute"' in data
+    assert '"test": "npm run test"' in data
 
 
 def test_plan_harness_detects_python_commands_and_status(tmp_path: Path) -> None:

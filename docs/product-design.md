@@ -160,11 +160,12 @@ The required Plane states are:
 
 Only Ready items are eligible for automatic dispatch.
 
-Automation modes:
+Workflow modes:
 
-- `manual`: follow-up tasks are reported, not created.
-- `assisted`: follow-up tasks are created in Backlog for review.
-- `full_agent`: follow-up child tasks are created in Ready within configured depth/count limits.
+- `execute_only`: create and run one implementer child task.
+- `plan_only`: run planner and create child tasks for human review.
+- `plan_execute`: run planner, create child tasks, and auto-run eligible children.
+- `full_auto`: run planner/worker/reviewer children, move parent to Done when required children pass, and create a delivery task.
 
 ## Run State Machine
 

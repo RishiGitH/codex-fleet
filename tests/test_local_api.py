@@ -12,6 +12,7 @@ from urllib.request import Request, urlopen
 import pytest
 
 import codex_fleet.local_api as local_api
+import codex_fleet.project_reconcile as project_reconcile
 from codex_fleet.config import FleetConfig, TrackerConfig
 from codex_fleet.factory import default_store_path
 from codex_fleet.local_api import (
@@ -65,6 +66,10 @@ def test_local_api_status_and_project_registration(tmp_path: Path) -> None:
         projects = _json_request(f"{base_url}/api/projects", token=server.token)
         project = _json_request(f"{base_url}/api/projects/{created['project']['id']}", token=server.token)
         assert projects["projects"][0]["repo_path"] == str(project_dir.resolve())
+        assert projects["projects"][0]["path_status"] == "ok"
+        assert projects["projects"][0]["plane_status"] in {"linked", "skipped"}
+        assert isinstance(projects["projects"][0]["status_message"], str)
+        assert projects["projects"][0]["can_run"] in {True, False}
         assert project["project"]["repo_path"] == str(project_dir.resolve())
     finally:
         server.shutdown()
@@ -210,18 +215,25 @@ def test_local_api_project_registration_can_save_settings_and_create_initial_goa
                 "codex_settings": {
                     "default_model": "gpt-5.4-mini",
                     "reasoning_effort": "high",
-                    "agent_task_mode": "agent_task_planner",
+                    "workflow_mode": "plan_execute",
                 },
             },
         )
 
-        settings = _json_request(f"{base_url}/api/projects/{created['project']['id']}/settings", token=server.token)
+        settings = _json_request(f"{base_url}/api/projects/{created['project']['id']}/fleet-settings", token=server.token)
+        patched = _json_request(
+            f"{base_url}/api/projects/{created['project']['id']}/fleet-settings",
+            method="PATCH",
+            token=server.token,
+            payload={"codex_settings": {"workflow_mode": "full_auto", "max_depth": 2}},
+        )
 
         assert created["project"]["codex_settings"]["default_model"] == "gpt-5.4-mini"
         assert created["initial_item"]["title"] == "Build a polished landing page"
         assert created["initial_item"]["state"] == "Ready"
         assert any("Initial work item created in Ready" in entry for entry in created["setup_log"])
-        assert settings["settings"]["agent_task_mode"] == "agent_task_planner"
+        assert settings["settings"]["workflow_mode"] == "plan_execute"
+        assert patched["settings"]["workflow_mode"] == "full_auto"
         metadata = RunStore(default_store_path(project_dir)).get_task_metadata(created["initial_item"]["id"])
         assert metadata is not None
         assert metadata.source == "human-requested"
@@ -229,6 +241,29 @@ def test_local_api_project_registration_can_save_settings_and_create_initial_goa
     finally:
         server.shutdown()
         thread.join(timeout=5)
+
+
+def test_codex_settings_payload_accepts_top_level_agent_profiles() -> None:
+    settings = local_api._codex_settings_payload(
+        {
+            "workflow_mode": "full_auto",
+            "subagents_enabled": True,
+            "enabled_agent_roles": ["planner", "implementer", "test_reviewer"],
+            "agent_profiles": {
+                "planner": {"model": "gpt-5.5", "reasoning_effort": "medium", "enabled": True},
+                "test_reviewer": {"model": "gpt-5.4-mini", "reasoning_effort": "high", "enabled": True},
+            },
+            "delivery_policy": {"create_draft_pr_on_success": True},
+            "test_policy": {"record_video": True},
+        }
+    )
+
+    assert settings["workflow_mode"] == "full_auto"
+    assert settings["subagents_enabled"] is True
+    assert settings["enabled_agent_roles"] == ["planner", "implementer", "test_reviewer"]
+    assert settings["agent_profiles"]["test_reviewer"]["reasoning_effort"] == "high"
+    assert settings["delivery_policy"]["create_draft_pr_on_success"] is True
+    assert settings["test_policy"]["record_video"] is True
 
 
 def test_local_api_extracts_codex_task_settings_from_work_item_description() -> None:
@@ -241,7 +276,7 @@ def test_local_api_extracts_codex_task_settings_from_work_item_description() -> 
             "<summary>codex-fleet task settings</summary><pre>{"
             "&quot;default_model&quot;: &quot;gpt-5.4-mini&quot;, "
             "&quot;reasoning_effort&quot;: &quot;high&quot;, "
-            "&quot;agent_task_mode&quot;: &quot;manual&quot;"
+            "&quot;workflow_mode&quot;: &quot;execute_only&quot;"
             "}</pre></details>"
         ),
         state="Ready",
@@ -252,8 +287,7 @@ def test_local_api_extracts_codex_task_settings_from_work_item_description() -> 
     assert settings == {
         "default_model": "gpt-5.4-mini",
         "reasoning_effort": "high",
-        "agent_task_mode": "manual",
-        "automation_mode": "manual",
+            "workflow_mode": "execute_only",
     }
 
 
@@ -327,6 +361,12 @@ def test_local_api_project_registration_links_plane_project(tmp_path: Path, monk
             assert external_id == str(project_dir.resolve())
             return {"id": "plane-project-id"}
 
+        def list_projects(self) -> list[dict[str, object]]:
+            return []
+
+        def join_projects(self, project_ids: list[str]) -> None:
+            raise AssertionError(f"unexpected join: {project_ids}")
+
         def list_labels(self) -> list[dict[str, str]]:
             return []
 
@@ -337,7 +377,7 @@ def test_local_api_project_registration_links_plane_project(tmp_path: Path, monk
         created_states = ("Ready", "Running")
 
     monkeypatch.setattr(
-        local_api,
+        project_reconcile,
         "load_config",
         lambda repo: FleetConfig(
             repo=tmp_path,
@@ -350,10 +390,10 @@ def test_local_api_project_registration_links_plane_project(tmp_path: Path, monk
             ),
         ).resolved(),
     )
-    monkeypatch.setattr(local_api, "build_plane_client", lambda config: FakePlaneClient())
-    monkeypatch.setattr(local_api, "ensure_plane_states", lambda client, active_states: FakeStateResult())
-    monkeypatch.setattr(local_api, "ensure_plane_labels", lambda client: ("human-requested", "agent-proposed", "agent-followup"))
-    monkeypatch.setattr(local_api, "write_plane_tracker_config", lambda repo, **kwargs: writes.append({"repo": repo, **kwargs}))
+    monkeypatch.setattr(project_reconcile, "build_plane_client", lambda config: FakePlaneClient())
+    monkeypatch.setattr(project_reconcile, "ensure_plane_states", lambda client, active_states: FakeStateResult())
+    monkeypatch.setattr(project_reconcile, "ensure_plane_labels", lambda client: ("human-requested", "agent-proposed", "agent-followup"))
+    monkeypatch.setattr(project_reconcile, "write_plane_tracker_config", lambda repo, **kwargs: writes.append({"repo": repo, **kwargs}))
 
     server = create_local_api_server(tmp_path, port=0)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -367,7 +407,7 @@ def test_local_api_project_registration_links_plane_project(tmp_path: Path, monk
             payload={"path": str(project_dir)},
         )
 
-        assert created["plane"]["status"] == "linked"
+        assert created["plane"]["status"] == "created"
         assert created["plane"]["project_id"] == "plane-project-id"
         assert set(created["plane"]["created_labels"]) == {"human-requested", "agent-proposed", "agent-followup"}
         assert created["project"]["plane_workspace_slug"] == "codex-local"
@@ -379,6 +419,7 @@ def test_local_api_project_registration_links_plane_project(tmp_path: Path, monk
                 "workspace_slug": "codex-local",
                 "project_id": "plane-project-id",
                 "api_key_value": "local-plane-token",
+                "codex_settings": created["project"]["codex_settings"],
             }
         ]
     finally:
@@ -419,6 +460,63 @@ def test_local_api_project_registration_can_require_plane_mapping(
         thread.join(timeout=5)
 
 
+def test_local_api_required_plane_mapping_accepts_created_status_and_applies_harness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project_dir = tmp_path / "sample"
+    project_dir.mkdir()
+    _init_git_repo(project_dir)
+    monkeypatch.setattr(
+        local_api,
+        "_ensure_plane_project_mapping",
+        lambda _server, project: (project, {"status": "created", "project_id": "new-plane-project"}),
+    )
+    server = create_local_api_server(tmp_path, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        created = _json_request(
+            f"{base_url}/api/projects",
+            method="POST",
+            token=server.token,
+            payload={
+                "path": str(project_dir),
+                "require_plane_mapping": True,
+                "apply_harness": True,
+                "codex_settings": {
+                    "workflow_mode": "full_auto",
+                    "default_model": "gpt-5.4-mini",
+                    "reasoning_effort": "high",
+                    "approval_policy": "never",
+                    "max_parallel_agents": 4,
+                    "max_depth": 3,
+                    "subagents_enabled": True,
+                },
+            },
+        )
+
+        assert created["plane"]["status"] == "created"
+        assert created["project"]["repo_path"] == str(project_dir.resolve())
+        assert (project_dir / "AGENTS.md").exists()
+        project_json = json.loads((project_dir / ".codex-fleet" / "project.json").read_text())
+        assert project_json["codex"]["workflow_mode"] == "full_auto"
+        assert project_json["codex"]["model"] == "gpt-5.4-mini"
+        assert project_json["codex"]["reasoning_effort"] == "high"
+        assert project_json["codex"]["approval_policy"] == "never"
+        assert project_json["codex"]["max_parallel_agents"] == 4
+        assert project_json["codex"]["subagents_enabled"] is True
+        codex_toml = (project_dir / ".codex" / "config.toml").read_text()
+        assert 'model = "gpt-5.4-mini"' in codex_toml
+        assert 'model_reasoning_effort = "high"' in codex_toml
+        assert 'approval_policy = "never"' in codex_toml
+        assert "max_threads = 4" in codex_toml
+        assert "max_depth = 3" in codex_toml
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
 def test_local_api_exposes_stored_runs(tmp_path: Path) -> None:
     artifact_path = tmp_path / ".codex-fleet-fake-run.txt"
     artifact_path.write_text("artifact body\n")
@@ -431,11 +529,11 @@ def test_local_api_exposes_stored_runs(tmp_path: Path) -> None:
         branch_name="codex-fleet/CF-1",
         worktree_path="/tmp/worktree",
         runner_name="CodexCliRunner",
-        agent_role="worker",
-        agent_name="Worker",
-        agent_avatar="W",
+        agent_role="implementer",
+        agent_name="Implementer",
+        agent_avatar="I",
         model="gpt-5.4-mini",
-        settings={"agent_task_mode": "review_and_approve"},
+        settings={"workflow_mode": "plan_execute"},
         token_usage={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
     )
     store.add_event("run-1", "completed", {"state": "Human Review"})
@@ -457,14 +555,16 @@ def test_local_api_exposes_stored_runs(tmp_path: Path) -> None:
         assert runs["runs"][0]["id"] == "run-1"
         assert run["run"]["status"] == "human_review"
         assert run["run"]["runner_name"] == "CodexCliRunner"
-        assert run["run"]["agent_role"] == "worker"
-        assert run["run"]["agent_name"] == "Worker"
+        assert run["run"]["agent_role"] == "implementer"
+        assert run["run"]["agent_name"] == "Implementer"
         assert run["run"]["model"] == "gpt-5.4-mini"
-        assert run["run"]["settings"]["agent_task_mode"] == "review_and_approve"
+        assert run["run"]["settings"]["workflow_mode"] == "plan_execute"
         assert run["run"]["token_usage"]["total_tokens"] == 15
         assert run["run"]["events"][0]["kind"] == "completed"
         assert run["run"]["events"][0]["run_id"] == "run-1"
         assert run["run"]["artifacts"][0]["path"].endswith(".codex-fleet-fake-run.txt")
+        assert run["run"]["artifacts"][0]["run_id"] == "run-1"
+        assert run["run"]["artifacts"][0]["download_path"] == f"/api/runs/run-1/artifacts/{run['run']['artifacts'][0]['id']}"
         assert run["run"]["artifacts"][0]["size_bytes"] == 14
         assert run["run"]["artifacts"][0]["sha256"] == "abc123"
         assert status["run"]["id"] == "run-1"
@@ -473,9 +573,61 @@ def test_local_api_exposes_stored_runs(tmp_path: Path) -> None:
         assert events["events"][0]["run_id"] == "run-1"
         assert analytics["analytics"]["runs_total"] == 1
         assert analytics["analytics"]["total_tokens"] == 15
-        assert analytics["analytics"]["by_role"][0]["role"] == "worker"
+        assert analytics["analytics"]["by_role"][0]["role"] == "implementer"
         assert status_payload["status"]["api"]["ready"] is True
         assert artifact == "artifact body\n"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_dashboard_transcript_previews_hide_protocol_noise(tmp_path: Path) -> None:
+    store = RunStore(default_store_path(tmp_path))
+    store.upsert_run(
+        run_id="run-chat",
+        item_id="item-1",
+        identifier="CF-1",
+        status="done",
+        branch_name="codex-fleet/CF-1",
+        worktree_path=None,
+        agent_role="test_reviewer",
+        agent_name="Test Agent",
+    )
+    store.add_run_message("run-chat", sequence=0, kind="chat_user", content="Build and test the page.")
+    store.add_run_message("run-chat", sequence=1, kind="system_event", content="account/rateLimits/updated")
+    store.add_run_message("run-chat", sequence=2, kind="chat_assistant", content="The preview passed.")
+    store.add_run_message("run-chat", sequence=3, kind="system_event", content="item/agentMessage/delta")
+
+    preview = local_api._transcript_previews_payload(store, store.list_runs())
+
+    assert [message["content"] for message in preview[0]["messages"]] == [
+        "Build and test the page.",
+        "The preview passed.",
+    ]
+
+
+def test_local_api_serves_video_artifact_with_video_mime_type(tmp_path: Path) -> None:
+    video_path = tmp_path / "preview.webm"
+    video_path.write_bytes(b"webm")
+    store = RunStore(default_store_path(tmp_path))
+    store.upsert_run(
+        run_id="run-video",
+        item_id="item-1",
+        identifier="CF-1",
+        status="done",
+        branch_name="codex-fleet/CF-1",
+        worktree_path=None,
+    )
+    store.add_artifact("run-video", str(video_path), kind="playwright_video", size_bytes=4)
+    server = create_local_api_server(tmp_path, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        request = Request(f"http://127.0.0.1:{server.server_port}/api/runs/run-video/artifacts/1", method="GET")
+        request.add_header("X-Codex-Fleet-Token", server.token)
+        with urlopen(request, timeout=5) as response:  # noqa: S310 - loopback test server.
+            assert response.headers.get_content_type() == "video/webm"
+            assert response.read() == b"webm"
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -523,8 +675,8 @@ def test_local_api_can_retry_and_cancel_runs(tmp_path: Path) -> None:
         )
 
         assert cancel["run"]["status"] == "cancelled"
-        assert cancel["state"] == "Cancelled"
-        assert local_items.fetch_items_by_ids(["memory-1"])[0].state == "Cancelled"
+        assert cancel["state"] == "Needs Input"
+        assert local_items.fetch_items_by_ids(["memory-1"])[0].state == "Needs Input"
         assert any(event["kind"] == "cancelled" for event in cancel["run"]["events"])
 
         local_items.update_item_state("memory-1", "Running")
@@ -534,42 +686,8 @@ def test_local_api_can_retry_and_cancel_runs(tmp_path: Path) -> None:
             token=server.token,
             payload={},
         )
-        assert item_cancel["state"] == "Cancelled"
-        assert item_cancel["item"]["state"] == "Cancelled"
-    finally:
-        server.shutdown()
-        thread.join(timeout=5)
-
-
-def test_local_api_cancel_active_run_stays_cancel_requested(tmp_path: Path) -> None:
-    _init_git_repo(tmp_path)
-    store = RunStore(default_store_path(tmp_path))
-    store.upsert_run(
-        run_id="active-run",
-        item_id="memory-1",
-        identifier="CF-1",
-        status="running_codex",
-    )
-    assert store.try_claim_item("memory-1", "active-run") is True
-    local_items = LocalWorkItemStore(default_local_work_item_store_path(tmp_path))
-    local_items.update_item_state("memory-1", "Running")
-    server = create_local_api_server(tmp_path, port=0)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    base_url = f"http://127.0.0.1:{server.server_port}"
-    try:
-        cancel = _json_request(
-            f"{base_url}/api/runs/active-run/cancel",
-            method="POST",
-            token=server.token,
-            payload={},
-        )
-
-        assert cancel["run"]["status"] == "cancel_requested"
-        assert cancel["state"] == "Cancelled"
-        assert local_items.fetch_items_by_ids(["memory-1"])[0].state == "Cancelled"
-        assert any(event["kind"] == "cancel_requested" for event in cancel["run"]["events"])
-        assert not any(event["kind"] == "cancelled" for event in cancel["run"]["events"])
+        assert item_cancel["state"] == "Needs Input"
+        assert item_cancel["item"]["state"] == "Needs Input"
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -578,6 +696,13 @@ def test_local_api_cancel_active_run_stays_cancel_requested(tmp_path: Path) -> N
 def test_local_api_exposes_work_item_parent_and_children(tmp_path: Path) -> None:
     store = RunStore(default_store_path(tmp_path))
     store.upsert_task_metadata(
+        item_id="parent-1",
+        source="human-requested",
+        depth=0,
+        role="orchestrator",
+        settings={"workflow_mode": "full_auto"},
+    )
+    store.upsert_task_metadata(
         item_id="child-1",
         source="agent-followup",
         depth=1,
@@ -585,10 +710,33 @@ def test_local_api_exposes_work_item_parent_and_children(tmp_path: Path) -> None
         parent_identifier="CF-1",
         parent_run_id="run-1",
         created_by_run_id="run-1",
-        role="worker",
+        role="implementer",
         depends_on=("dep-1",),
-        settings={"role": "worker"},
+        settings={"role": "implementer"},
     )
+    store.upsert_run(
+        run_id="run-proof",
+        item_id="child-1",
+        identifier="CF-2",
+        status="human_review",
+        branch_name="codex-fleet/CF-2",
+        worktree_path=str(tmp_path / ".codex-fleet" / "workspaces" / "CF-2"),
+        runner_name="CodexAppServerRunner",
+        agent_role="test_reviewer",
+        model="gpt-5.4-mini",
+        reasoning_effort="high",
+        settings={
+            "preview_url": "http://127.0.0.1:4123",
+            "test_video_url": "http://127.0.0.1:48111/preview.webm",
+            "test_video_path": str(tmp_path / ".codex-fleet" / "artifacts" / "run-proof" / "preview.webm"),
+            "screenshot_paths": [str(tmp_path / ".codex-fleet" / "artifacts" / "run-proof" / "desktop.png")],
+            "test_proof_status": "passed",
+            "proof_kind": "browser_video",
+            "proof_status": "passed",
+        },
+    )
+    store.add_event("run-proof", "runner_finished", {"changed_files": ["app/page.tsx"]})
+    store.add_artifact("run-proof", str(tmp_path / ".codex-fleet" / "artifacts" / "run-proof" / "preview.webm"), kind="playwright_video")
     server = create_local_api_server(tmp_path, port=0)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -596,12 +744,27 @@ def test_local_api_exposes_work_item_parent_and_children(tmp_path: Path) -> None
     try:
         children = _json_request(f"{base_url}/api/work-items/parent-1/children", token=server.token)
         parent = _json_request(f"{base_url}/api/work-items/child-1/parent", token=server.token)
+        graph = _json_request(f"{base_url}/api/work-items/parent-1/graph", token=server.token)
+        dashboard = _json_request(f"{base_url}/api/projects/current/fleet-dashboard", token=server.token)
 
         assert children["children"][0]["item_id"] == "child-1"
-        assert children["children"][0]["role"] == "worker"
+        assert children["children"][0]["role"] == "implementer"
         assert children["children"][0]["depends_on"] == ["dep-1"]
         assert parent["parent"]["parent_item_id"] == "parent-1"
-        assert parent["parent"]["settings"] == {"role": "worker"}
+        assert parent["parent"]["settings"] == {"role": "implementer"}
+        assert graph["graph"]["root"]["item_id"] == "parent-1"
+        assert graph["graph"]["children"][0]["item_id"] == "child-1"
+        assert dashboard["dashboard"]["root_tasks"][0]["item_id"] == "parent-1"
+        assert dashboard["dashboard"]["token_usage"] == {"status": "Unavailable"}
+        proof = dashboard["dashboard"]["proof_pack"]
+        assert proof["status"] == "passed"
+        assert proof["preview_url"] == "http://127.0.0.1:4123"
+        assert proof["video_url"] == "http://127.0.0.1:48111/preview.webm"
+        assert proof["primary_task"] == "CF-2"
+        assert proof["primary_role"] == "test_reviewer"
+        assert proof["proof_kind"] == "browser_video"
+        assert proof["proof_warning"] is None
+        assert proof["changed_files"] == ["app/page.tsx"]
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -619,14 +782,13 @@ def test_local_api_updates_work_item_settings(tmp_path: Path) -> None:
             method="POST",
             token=server.token,
             payload={
-                "automation_mode": "full_agent",
+                "workflow_mode": "full_auto",
                 "agent_role": "planner",
                 "depends_on": ["memory-0"],
             },
         )
 
-        assert result["settings"]["automation_mode"] == "full_agent"
-        assert result["settings"]["agent_task_mode"] == "agent_task_planner"
+        assert result["settings"]["workflow_mode"] == "full_auto"
         assert result["metadata"]["role"] == "planner"
         assert result["metadata"]["depends_on"] == ["memory-0"]
     finally:
@@ -634,7 +796,45 @@ def test_local_api_updates_work_item_settings(tmp_path: Path) -> None:
         thread.join(timeout=5)
 
 
-def test_local_api_plan_runs_with_planner_settings(tmp_path: Path) -> None:
+def test_local_api_proof_pack_returns_cli_logs(tmp_path: Path) -> None:
+    store = RunStore(default_store_path(tmp_path))
+    log_path = tmp_path / ".codex-fleet" / "artifacts" / "run-cli" / "pytest.log"
+    log_path.parent.mkdir(parents=True)
+    log_path.write_text("tests passed\n")
+    store.upsert_run(
+        run_id="run-cli",
+        item_id="child-1",
+        identifier="CF-2",
+        status="done",
+        branch_name="codex-fleet/CF-2",
+        worktree_path=str(tmp_path / ".codex-fleet" / "workspaces" / "CF-2"),
+        runner_name="CodexAppServerRunner",
+        agent_role="implementer",
+        settings={
+            "proof_kind": "cli_logs",
+            "proof_status": "cli_passed",
+            "proof_log_paths": [str(log_path)],
+        },
+    )
+    store.add_artifact("run-cli", str(log_path), kind="test_summary")
+    server = create_local_api_server(tmp_path, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        dashboard = _json_request(f"{base_url}/api/projects/current/fleet-dashboard", token=server.token)
+
+        proof = dashboard["dashboard"]["proof_pack"]
+        assert proof["status"] == "passed"
+        assert proof["proof_kind"] == "cli_logs"
+        assert proof["test_status"] == "cli_passed"
+        assert proof["proof_log_paths"] == [str(log_path)]
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_local_api_creates_delivery_task_with_local_fallback(tmp_path: Path) -> None:
     _init_git_repo(tmp_path)
     server = create_local_api_server(tmp_path, port=0)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -642,16 +842,17 @@ def test_local_api_plan_runs_with_planner_settings(tmp_path: Path) -> None:
     base_url = f"http://127.0.0.1:{server.server_port}"
     try:
         result = _json_request(
-            f"{base_url}/api/work-items/memory-1/plan",
+            f"{base_url}/api/work-items/memory-1/delivery-task",
             method="POST",
             token=server.token,
-            payload={"fake": True},
+            payload={"branch": "codex-fleet/memory-1", "worktree": str(tmp_path / "worktree")},
         )
 
-        assert result["dispatched"] is True
-        assert result["run"]["settings"]["automation_mode"] == "full_agent"
-        assert result["run"]["settings"]["agent_task_mode"] == "agent_task_planner"
-        assert result["run"]["settings"]["agent_role"] == "planner"
+        assert result["item"]["title"].startswith("Publish or merge result for")
+        metadata = RunStore(default_store_path(tmp_path)).get_task_metadata(result["item"]["id"])
+        assert metadata is not None
+        assert metadata.role == "delivery_manager"
+        assert metadata.settings["delivery_status"] == "task_created"
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -723,7 +924,7 @@ def test_local_api_next_ready_uses_work_item_codex_settings(tmp_path: Path, monk
         '<p>Do the first step.</p><details data-codex-fleet-task-settings="true">'
         "<summary>codex-fleet task settings</summary><pre>"
         "{&quot;default_model&quot;: &quot;gpt-5.5&quot;, &quot;reasoning_effort&quot;: &quot;low&quot;, "
-        "&quot;agent_task_mode&quot;: &quot;manual&quot;}"
+        "&quot;workflow_mode&quot;: &quot;execute_only&quot;}"
         "</pre></details>"
     )
     try:
@@ -741,11 +942,9 @@ def test_local_api_next_ready_uses_work_item_codex_settings(tmp_path: Path, monk
         )
         ready_after_run = _json_request(f"{base_url}/api/work-items/ready", token=server.token)
 
-        assert result["dispatched"] is True
-        assert result["run"]["status"] == "human_review"
-        assert ready_after_run["items"] == []
-        events = RunStore(default_store_path(tmp_path)).list_events(result["run"]["id"])
-        assert "proposed_tasks_skipped" in [event.kind for event in events]
+        assert result["dispatched"] is False
+        assert result["run"] is None
+        assert [item["title"] for item in ready_after_run["items"]] == ["Implement CF-2: Task with manual follow-ups"]
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -873,7 +1072,8 @@ def test_local_api_can_run_next_ready_item_to_rework(tmp_path: Path) -> None:
         assert result["run"]["status"] == "rework"
         assert result["run"]["error"] == "configured failure"
         failed = [event for event in run["run"]["events"] if event["kind"] == "failed"]
-        assert failed[-1]["payload"]["state"] == "Rework"
+        assert failed[-1]["payload"]["state"] == "Needs Input"
+        assert failed[-1]["payload"]["run_status"] == "rework"
 
         ready_after_run = _json_request(f"{base_url}/api/work-items/ready", token=server.token)
         assert ready_after_run["items"] == []
@@ -983,6 +1183,38 @@ def test_local_api_creates_new_starter_project(tmp_path: Path) -> None:
         subprocess.run(["git", "rev-parse", "--verify", "HEAD"], cwd=project_path, check=True, capture_output=True)
         assert (project_path / "AGENTS.md").exists()
         assert created["harness"]["status"] in {"ready", "warnings"}
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_local_api_creates_next_starter_with_pinned_safe_dependencies(tmp_path: Path) -> None:
+    parent = tmp_path / "projects"
+    parent.mkdir()
+    server = create_local_api_server(tmp_path, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        created = _json_request(
+            f"{base_url}/api/projects",
+            method="POST",
+            token=server.token,
+            payload={
+                "create_new": True,
+                "name": "Demo Next",
+                "location": str(parent),
+                "project_type": "node-next",
+            },
+        )
+        project_path = Path(created["project"]["repo_path"])
+        package = json.loads((project_path / "package.json").read_text())
+
+        assert package["dependencies"] == local_api.NEXT_STARTER_DEPENDENCIES
+        assert "latest" not in package["dependencies"].values()
+        assert package["scripts"] == {"dev": "next dev", "build": "next build"}
+        assert (project_path / "app/layout.tsx").exists()
+        assert (project_path / "app/page.tsx").exists()
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -1124,6 +1356,124 @@ def test_plane_login_url_uses_nonce_without_long_lived_token(tmp_path: Path) -> 
     assert "token" not in redirect_fragment
 
 
+def test_plane_login_url_endpoint_requires_token_and_returns_connected_url(tmp_path: Path) -> None:
+    server = create_local_api_server(tmp_path, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        with pytest.raises(HTTPError) as unauthorized:
+            _json_request(
+                f"{base_url}/api/plane/login-url",
+                method="POST",
+                payload={"redirect_path": "codex-fleet/projects/"},
+            )
+        assert unauthorized.value.code == 401
+
+        result = _json_request(
+            f"{base_url}/api/plane/login-url",
+            method="POST",
+            token=server.token,
+            payload={"redirect_path": "codex-fleet/projects/"},
+        )
+        url = str(result["url"])
+        parsed = urlparse(url)
+        query = parse_qs(parsed.query)
+        redirect = urlparse(query["redirect"][0])
+        redirect_fragment = parse_qs(redirect.fragment)
+
+        assert parsed.path == "/api/plane/login"
+        assert query["nonce"][0]
+        assert "token" not in query
+        assert server.token not in url
+        assert redirect.path == "/codex-fleet/projects/"
+        assert redirect_fragment["apiUrl"] == [base_url]
+        assert "token" not in redirect_fragment
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_plane_login_url_endpoint_rejects_external_redirect(tmp_path: Path) -> None:
+    server = create_local_api_server(tmp_path, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        with pytest.raises(HTTPError) as error:
+            _json_request(
+                f"{base_url}/api/plane/login-url",
+                method="POST",
+                token=server.token,
+                payload={"redirect_path": "https://example.com/codex-fleet/projects/"},
+            )
+
+        assert error.value.code == 400
+        body = json.loads(error.value.read().decode("utf-8"))
+        assert body["code"] == "bad_request"
+        assert "relative local Plane path" in body["error"]
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_plane_connect_redirects_with_session_code_without_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        local_api,
+        "create_local_plane_session",
+        lambda repo: PlaneLocalSessionResult(session_key="plane-session-test", user_email="codex-fleet-local@example.local"),
+    )
+    server = create_local_api_server(tmp_path, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", server.server_port)
+        conn.request("GET", "/api/plane/connect?redirect_path=codex-fleet/projects/")
+        response = conn.getresponse()
+        location = response.getheader("Location") or ""
+        parsed = urlparse(location)
+        fragment = parse_qs(parsed.fragment)
+
+        assert response.status == 302
+        assert parsed.scheme == "http"
+        assert parsed.netloc == "127.0.0.1:17880"
+        assert parsed.path == "/codex-fleet/projects/"
+        assert fragment["apiUrl"] == [f"http://127.0.0.1:{server.server_port}"]
+        assert fragment["code"][0]
+        assert "token" not in fragment
+        assert server.token not in location
+        headers = ";".join(f"{name}={value}" for name, value in response.getheaders())
+        assert "session-id=plane-session-test" in headers
+
+        exchanged = _json_request(f"http://127.0.0.1:{server.server_port}/api/session/exchange?code={fragment['code'][0]}")
+        assert exchanged["token"] == server.token
+        with pytest.raises(HTTPError) as reused:
+            _json_request(f"http://127.0.0.1:{server.server_port}/api/session/exchange?code={fragment['code'][0]}")
+        assert reused.value.code == 401
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_plane_connect_rejects_external_redirect(tmp_path: Path) -> None:
+    server = create_local_api_server(tmp_path, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with pytest.raises(HTTPError) as error:
+            _json_request(
+                f"http://127.0.0.1:{server.server_port}/api/plane/connect?redirect_path=https%3A%2F%2Fexample.com%2F",
+            )
+
+        assert error.value.code == 400
+        body = json.loads(error.value.read().decode("utf-8"))
+        assert body["code"] == "bad_request"
+        assert "relative local Plane path" in body["error"]
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
 def test_plane_login_endpoint_sets_plane_session_cookie(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         local_api,
@@ -1230,40 +1580,130 @@ def test_local_api_fleet_logs_reports_unlinked_plane_project(tmp_path: Path) -> 
         assert logs["project"] is None
         assert logs["runs"] == []
         assert logs["tasks"] == []
-        assert "not linked" in logs["message"]
+        assert "Codex is not configured" in logs["message"]
     finally:
         server.shutdown()
         thread.join(timeout=5)
 
 
-def test_local_api_fleet_logs_uses_newest_run_for_task_latest_run(tmp_path: Path) -> None:
-    _init_git_repo(tmp_path)
-    store = RunStore(default_store_path(tmp_path))
-    store.upsert_task_metadata(
-        item_id="child-1",
-        source="agent-followup",
-        depth=1,
-        parent_item_id="parent-1",
-        parent_identifier="CF-1",
-        parent_run_id="parent-run",
-        created_by_run_id="parent-run",
-        role="worker",
+def test_local_api_unconfigured_plane_project_returns_setup_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        local_api,
+        "load_config",
+        lambda repo: FleetConfig(
+            repo=tmp_path,
+            tracker=TrackerConfig(
+                kind="plane",
+                plane_base_url="http://127.0.0.1:17880",
+                plane_api_key="local-plane-token",
+                plane_workspace_slug="codex-local",
+                plane_project_id="control-project-id",
+            ),
+        ).resolved(),
     )
-    store.upsert_run(run_id="run-1", item_id="child-1", identifier="CF-2", status="failed")
-    store.upsert_run(run_id="run-2", item_id="child-1", identifier="CF-2", status="human_review")
     server = create_local_api_server(tmp_path, port=0)
-    project = server.registry.add_project(tmp_path)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        with pytest.raises(HTTPError) as unconfigured:
+            _json_request(
+                f"{base_url}/api/work-items/ready?plane_project_id=unlinked-plane-project",
+                token=server.token,
+            )
+        body = json.loads(unconfigured.value.read().decode("utf-8"))
+        assert unconfigured.value.code == 409
+        assert body["code"] == "codex_not_configured"
+        assert "Codex is not configured" in body["error"]
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_local_api_configures_existing_repo_for_plane_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project_dir = tmp_path / "product"
+    project_dir.mkdir()
+    _init_git_repo(project_dir)
+
+    class FakeStateResult:
+        created_states = ("Ready",)
+
+    class FakePlaneClient:
+        settings = PlaneSettings(
+            base_url="http://127.0.0.1:17880",
+            api_key="local-plane-token",
+            workspace_slug="codex-local",
+            project_id="control-project-id",
+        )
+
+        def list_labels(self) -> list[dict[str, str]]:
+            return []
+
+        def create_label(self, name: str, color: str) -> dict[str, str]:
+            return {"id": name, "name": name, "color": color}
+
+        def list_states(self) -> list[dict[str, str]]:
+            return []
+
+        def create_state(self, name: str, group: str, color: str) -> dict[str, str]:
+            return {"id": name, "name": name, "group": group, "color": color}
+
+        def list_projects(self) -> list[dict[str, object]]:
+            return [{"id": "visible-plane-project", "is_member": True}]
+
+        def ensure_project(self, *, name: str, identifier_seed: str, external_id: str) -> dict[str, str]:
+            raise AssertionError("existing Plane project should be reused")
+
+        def join_projects(self, project_ids: list[str]) -> None:
+            raise AssertionError(f"unexpected join: {project_ids}")
+
+    monkeypatch.setattr(
+        project_reconcile,
+        "load_config",
+        lambda repo: FleetConfig(
+            repo=tmp_path,
+            tracker=TrackerConfig(
+                kind="plane",
+                plane_base_url="http://127.0.0.1:17880",
+                plane_api_key="local-plane-token",
+                plane_workspace_slug="codex-local",
+                plane_project_id="control-project-id",
+            ),
+        ).resolved(),
+    )
+    monkeypatch.setattr(project_reconcile, "build_plane_client", lambda config: FakePlaneClient())
+    monkeypatch.setattr(project_reconcile, "ensure_plane_states", lambda client, active_states: FakeStateResult())
+    monkeypatch.setattr(project_reconcile, "ensure_plane_labels", lambda client: ("human-requested",))
+    monkeypatch.setattr(project_reconcile, "write_plane_tracker_config", lambda repo, **kwargs: None)
+    monkeypatch.setattr(local_api, "_comment_plane_project_configured", lambda server, project, setup_log: None)
+
+    server = create_local_api_server(tmp_path, port=0)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base_url = f"http://127.0.0.1:{server.server_port}"
     try:
         result = _json_request(
-            f"{base_url}/api/projects/{project.id}/fleet-logs",
+            f"{base_url}/api/projects/configure-codex",
+            method="POST",
             token=server.token,
+            payload={
+                "plane_project_id": "visible-plane-project",
+                "mode": "add_existing",
+                "repo_path": str(project_dir),
+                "workflow_mode": "plan_execute",
+            },
         )
 
-        task = result["fleet_logs"]["tasks"][0]
-        assert task["latest_run"]["id"] == "run-2"
+        assert result["ok"] is True
+        assert result["project"]["repo_path"] == str(project_dir.resolve())
+        assert result["project"]["plane_project_id"] == "visible-plane-project"
+        assert result["plane"]["status"] == "linked"
+        linked = server.registry.get_project_by_plane_id(
+            workspace_slug="codex-local",
+            plane_project_id="visible-plane-project",
+        )
+        assert linked is not None
+        assert linked.repo_path == project_dir.resolve()
     finally:
         server.shutdown()
         thread.join(timeout=5)

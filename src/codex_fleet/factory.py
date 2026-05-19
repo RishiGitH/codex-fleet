@@ -6,7 +6,7 @@ from pathlib import Path
 from codex_fleet.config import FleetConfig
 from codex_fleet.models import WorkItem
 from codex_fleet.plane import PlaneClient, PlaneSettings, PlaneTracker
-from codex_fleet.runner import CodexAppServerRunner, CodexCliRunner, FakeRunner, Runner
+from codex_fleet.runner import CodexAppServerRunner, FakeRunner, Runner
 from codex_fleet.tracker import MemoryTracker, Tracker
 
 
@@ -44,21 +44,24 @@ def build_plane_client(config: FleetConfig) -> PlaneClient:
     return PlaneClient(settings)
 
 
-def build_runner(config: FleetConfig, *, fake: bool = False, fake_succeed: bool = True) -> Runner:
+def build_runner(
+    config: FleetConfig,
+    *,
+    fake: bool = False,
+    fake_succeed: bool = True,
+    agent_role: str | None = None,
+    human_answers: list[dict[str, object]] | None = None,
+) -> Runner:
     if fake:
         return FakeRunner(succeed=fake_succeed)
-    if config.codex.runner == "cli":
-        return CodexCliRunner(
-            command=config.codex.command,
-            approval_policy=config.codex.approval_policy,
-            sandbox_mode=config.codex.sandbox_mode,
-            timeout_seconds=max(1, config.codex.turn_timeout_ms // 1000),
-            stream_logs=config.codex.stream_logs,
-        )
     return CodexAppServerRunner(
-        command=config.codex.command,
+        command=config.codex.command if "app-server" in config.codex.command else "codex app-server",
         approval_policy=config.codex.approval_policy,
         sandbox_mode=config.codex.sandbox_mode,
+        model=config.codex.model,
+        reasoning_effort=config.codex.reasoning_effort,
+        agent_role=agent_role,
+        human_answers=human_answers,
         timeout_seconds=max(1, config.codex.turn_timeout_ms // 1000),
     )
 

@@ -6,6 +6,8 @@ This file gives Codex concise project guidance for working in `codex-fleet`.
 
 `codex-fleet` is a local control plane for running Codex agents from issue-board work. It uses a branded local Plane fork as the board/tracker UI, exposes a loopback-only codex-fleet API for local UI actions, implements a Symphony-style orchestration loop, creates isolated git worktrees, and runs Codex App Server sessions as task agents.
 
+The canonical workflow modes are `execute_only`, `plan_only`, `plan_execute`, and `full_auto`. Do not reintroduce legacy modes such as `manual`, `assisted`, `full_agent`, `agent_task_mode`, `review_and_approve`, or `agent_task_planner`.
+
 ## Source of truth
 
 - Architecture: `docs/architecture.md`
@@ -81,6 +83,8 @@ python -m codex_fleet api --repo .
 - Do not vendor Symphony into this repo.
 - Plane UI must call codex-fleet API for agent actions; it must not shell out or run Codex directly.
 - Keep critical state transitions in deterministic daemon code, not only in prompts.
+- Every durable subagent assignment must become a Plane child task.
+- GitHub is optional; delivery must fall back to local branch/worktree merge instructions.
 - Default to safe local execution: no auto-merge, no deploy, no broad filesystem writes.
 - Add or update tests for orchestrator, tracker, workspace, doctor, and runner changes.
 - Update docs when changing architecture, workflow states, safety policy, or user-facing CLI.

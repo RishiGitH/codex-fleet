@@ -7,7 +7,6 @@ import subprocess
 import time
 import webbrowser
 from dataclasses import dataclass
-from importlib import resources
 from pathlib import Path
 
 import httpx
@@ -17,8 +16,8 @@ from codex_fleet.config import default_config_path
 
 DEFAULT_PLANE_URL = "http://127.0.0.1:17880"
 PLANE_RUNTIME_DIR = Path(".codex-fleet") / "plane-selfhost"
-PLANE_SOURCE_DIR = Path(".codex-fleet") / "plane-src"
-PLANE_PATCH_PATH = Path("patches") / "plane-codex-fleet.patch"
+STALE_PLANE_SOURCE_DIR = Path(".codex-fleet") / "plane-src"
+PLANE_SOURCE_DIR = Path("apps") / "plane"
 PLANE_SOURCE_LOCK_RESOURCE = "plane-source.lock.yml"
 PLANE_SETUP_URL = "https://github.com/makeplane/plane/releases/latest/download/setup.sh"
 DEFAULT_PLANE_SOURCE_URL = "https://github.com/makeplane/plane.git"
@@ -67,7 +66,6 @@ class PlaneSource:
 class PlaneSourceLock:
     source_url: str
     ref: str
-    patch_resource: str
     strategy: str
     notes: str
 
@@ -101,20 +99,20 @@ class PlaneFrontendReport:
 def inspect_plane_source(repo: Path, source_dir: Path | None = None) -> PlaneSource:
     root = _source_dir(repo, source_dir)
     manifest_path = root / ".codex-fleet-plane-source.yml"
-    if not (root / ".git").exists():
+    if not _looks_like_plane_source(root):
         return PlaneSource(source_dir=root, exists=False, manifest_path=manifest_path)
     return PlaneSource(
         source_dir=root,
         exists=True,
-        remote_url=_git_output(root, "config", "--get", "remote.origin.url"),
+        remote_url=_git_output(root, "config", "--get", "remote.origin.url") or _manifest_value(manifest_path, "source_url"),
         requested_ref=_manifest_ref(manifest_path),
-        current_commit=_git_output(root, "rev-parse", "HEAD"),
+        current_commit=_git_output(root, "rev-parse", "HEAD") or _manifest_value(manifest_path, "current_commit"),
         manifest_path=manifest_path,
     )
 
 
 def default_plane_source_lock_path() -> Path:
-    return Path(str(resources.files("codex_fleet.resources").joinpath(PLANE_SOURCE_LOCK_RESOURCE)))
+    return Path(__file__).parent / "resources" / PLANE_SOURCE_LOCK_RESOURCE
 
 
 def load_plane_source_lock(path: Path | None = None) -> PlaneSourceLock:
@@ -126,7 +124,6 @@ def load_plane_source_lock(path: Path | None = None) -> PlaneSourceLock:
         return PlaneSourceLock(
             source_url=str(raw["source_url"]),
             ref=str(raw["ref"]),
-            patch_resource=str(raw["patch_resource"]),
             strategy=str(raw["strategy"]),
             notes=str(raw.get("notes", "")),
         )
@@ -134,36 +131,32 @@ def load_plane_source_lock(path: Path | None = None) -> PlaneSourceLock:
         raise PlaneManagerError(f"Plane source lock missing required field: {exc.args[0]}") from exc
 
 
-def ensure_plane_source(
+def require_plane_source(repo: Path, source_dir: Path | None = None) -> PlaneSource:
+    repo = repo.expanduser().absolute()
+    stale = repo / STALE_PLANE_SOURCE_DIR
+    if stale.exists():
+        raise PlaneManagerError(
+            f"Stale Plane runtime source exists at {stale}. Delete it before running codex-fleet; "
+            "Plane product source now lives at apps/plane."
+        )
+    source = inspect_plane_source(repo, source_dir)
+    if not source.exists:
+        raise PlaneManagerError(
+            f"Plane product source is missing at {source.source_dir}. Restore tracked apps/plane before running codex-fleet."
+        )
+    return source
+
+
+def write_plane_source_manifest(
     repo: Path,
     *,
     source_url: str = DEFAULT_PLANE_SOURCE_URL,
     ref: str | None = DEFAULT_PLANE_SOURCE_REF,
     source_dir: Path | None = None,
-    apply_customizations: bool = True,
 ) -> PlaneSource:
-    root = _source_dir(repo, source_dir)
+    root = require_plane_source(repo, source_dir).source_dir
     repo = repo.expanduser().absolute()
-    _require("git", "git is required to clone the Plane source.")
-    if not (root / ".git").exists():
-        root.parent.mkdir(parents=True, exist_ok=True)
-        result = subprocess.run(
-            ["git", "clone", "--filter=blob:none", source_url, str(root)],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        if result.returncode != 0:
-            raise PlaneManagerError(result.stderr.strip() or "Failed to clone Plane source")
-    if ref:
-        _git_checked(root, "fetch", "--depth", "1", "origin", ref)
-        _git_checked(root, "checkout", ref)
-        _git_checked(root, "reset", "--hard", ref)
-        _git_checked(root, "clean", "-fd")
-    patch_path = default_plane_patch_path(repo)
-    if apply_customizations and patch_path.exists() and not verify_plane_customization(repo, root).ok:
-        apply_plane_customization_patch(repo, source_dir=root, patch_path=patch_path)
-    commit = _git_output(root, "rev-parse", "HEAD")
+    commit = _git_output(root, "rev-parse", "HEAD") or ref
     manifest_path = root / ".codex-fleet-plane-source.yml"
     lock = load_plane_source_lock()
     manifest = {
@@ -172,123 +165,10 @@ def ensure_plane_source(
         "current_commit": commit,
         "lock_source_url": lock.source_url,
         "lock_ref": lock.ref,
-        "patch_resource": lock.patch_resource,
-        "notes": "Runtime Plane source clone for codex-fleet customization. Prefer a pinned fork/submodule for product releases.",
+        "notes": "Tracked Plane product source for codex-fleet customization.",
     }
     manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False))
     return inspect_plane_source(repo, source_dir)
-
-
-def default_plane_patch_path(repo: Path) -> Path:
-    """Return the patch used for applying Plane customizations.
-
-    A repo-local patch wins for maintainers working in this repository. Installed
-    package users fall back to the bundled patch resource.
-    """
-    repo_patch = repo.expanduser().absolute() / PLANE_PATCH_PATH
-    if repo_patch.exists():
-        return repo_patch
-    return Path(str(resources.files("codex_fleet.resources").joinpath("plane-codex-fleet.patch")))
-
-
-def repo_plane_patch_path(repo: Path) -> Path:
-    return repo.expanduser().absolute() / PLANE_PATCH_PATH
-
-
-def export_plane_customization_patch(
-    repo: Path,
-    *,
-    source_dir: Path | None = None,
-    patch_path: Path | None = None,
-) -> Path:
-    repo = repo.expanduser().absolute()
-    root = _source_dir(repo, source_dir)
-    if not (root / ".git").exists():
-        raise PlaneManagerError(f"Plane source is not a git checkout: {root}")
-    target = (patch_path or repo_plane_patch_path(repo)).expanduser()
-    if not target.is_absolute():
-        target = repo / target
-    target.parent.mkdir(parents=True, exist_ok=True)
-    intent_paths = [
-        path
-        for path in (
-            ".codex-fleet-plane-source.yml",
-            "AGENTS.md",
-            "apps/web/app/routes/core.ts",
-            "apps/web/app/codex-fleet",
-            "apps/web/app/(all)/[workspaceSlug]/(projects)/star-us-link.tsx",
-            "apps/web/app/(all)/[workspaceSlug]/(settings)/settings/projects/[projectId]/codex-fleet",
-            "apps/web/ce/components/projects/create/root.tsx",
-            "apps/web/core/components/issues/issue-modal/form.tsx",
-            "apps/web/core/components/issues/issue-layouts/kanban/block.tsx",
-            "apps/web/core/components/issues/issue-layouts/list/block.tsx",
-            "apps/web/core/components/issues/issue-detail/main-content.tsx",
-            "apps/web/core/components/common/logo-spinner.tsx",
-            "apps/web/core/components/settings/project/sidebar/item-icon.tsx",
-            "apps/web/public/codex-fleet-logo.svg",
-            "apps/api/plane/seeds/data/projects.json",
-            "apps/api/plane/seeds/data/issues.json",
-            "apps/api/plane/seeds/data/cycles.json",
-            "apps/api/plane/seeds/data/pages.json",
-            "packages/constants/src/settings/project.ts",
-            "packages/types/src/settings.ts",
-            "packages/i18n/src/locales/en/translations.ts",
-        )
-        if (root / path).exists()
-    ]
-    if intent_paths:
-        _git_checked(root, "add", "-N", *intent_paths)
-    try:
-        result = subprocess.run(
-            [
-                "git",
-                "diff",
-                "--binary",
-                "--",
-                "AGENTS.md",
-                "apps/web",
-                "apps/api/plane/seeds/data/projects.json",
-                "apps/api/plane/seeds/data/issues.json",
-                "apps/api/plane/seeds/data/cycles.json",
-                "apps/api/plane/seeds/data/pages.json",
-                "packages/i18n/src/locales/en/translations.ts",
-                ".codex-fleet-plane-source.yml",
-            ],
-            cwd=root,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-    finally:
-        if intent_paths:
-            _git_checked(root, "reset", "-q", "--", *intent_paths)
-    if result.returncode != 0:
-        raise PlaneManagerError(result.stderr.strip() or "Failed to export Plane customization patch")
-    if not result.stdout.strip():
-        raise PlaneManagerError("Plane source has no customization diff to export.")
-    target.write_text(result.stdout)
-    return target
-
-
-def apply_plane_customization_patch(
-    repo: Path,
-    *,
-    source_dir: Path | None = None,
-    patch_path: Path | None = None,
-) -> Path:
-    repo = repo.expanduser().absolute()
-    root = _source_dir(repo, source_dir)
-    patch = (patch_path or default_plane_patch_path(repo)).expanduser()
-    if not patch.is_absolute():
-        patch = repo / patch
-    if not patch.exists():
-        raise PlaneManagerError(f"Plane customization patch not found: {patch}")
-    if not (root / ".git").exists():
-        raise PlaneManagerError(f"Plane source is not a git checkout: {root}")
-    if verify_plane_customization(repo, root).ok:
-        return root
-    _git_checked(root, "apply", "--whitespace=nowarn", str(patch))
-    return root
 
 
 def verify_plane_customization(repo: Path, source_dir: Path | None = None) -> PlaneCustomizationReport:
@@ -313,7 +193,7 @@ def verify_plane_customization(repo: Path, source_dir: Path | None = None) -> Pl
             "home_github_link_target",
         ),
         _check_contains(root / "apps/web/app/(home)/page.tsx", "Open project dashboard", "home_projects_button"),
-        _check_contains(root / "apps/web/app/(home)/page.tsx", "/codex-fleet/projects/", "home_projects_link"),
+        _check_contains(root / "apps/web/app/(home)/page.tsx", "/codex-fleet/dashboard", "home_projects_link"),
         _check_contains(root / "apps/web/app/(home)/page.tsx", "Connection setup", "home_connection_setup_fallback"),
         _check_contains(
             root / "apps/web/app/(home)/page.tsx",
@@ -324,6 +204,41 @@ def verify_plane_customization(repo: Path, source_dir: Path | None = None) -> Pl
         _check_not_contains(root / "apps/web/app/(home)/page.tsx", "Plane", "home_hides_plane_branding"),
         _check_not_contains(root / "apps/web/app/root.tsx", "Plane-based", "root_description_hides_plane_branding"),
         _check_not_contains(root / "apps/web/app/layout.tsx", "Plane-based", "layout_description_hides_plane_branding"),
+        _check_contains(
+            root / "apps/web/core/lib/wrappers/instance-wrapper.tsx",
+            'startsWith("/codex-fleet")',
+            "first_run_allows_codex_fleet_routes",
+        ),
+        _check_contains(
+            root / "apps/web/core/components/instance/not-ready-view.tsx",
+            "Open Codex Fleet",
+            "first_run_codex_fleet_action",
+        ),
+        _check_contains(
+            root / "apps/web/core/components/instance/not-ready-view.tsx",
+            "/codex-fleet/dashboard",
+            "first_run_dashboard_link",
+        ),
+        _check_contains(
+            root / "apps/web/core/components/instance/not-ready-view.tsx",
+            "/codex-fleet/onboarding",
+            "first_run_onboarding_link",
+        ),
+        _check_not_contains(
+            root / "apps/web/core/components/instance/not-ready-view.tsx",
+            "Welcome to Plane",
+            "first_run_hides_plane_welcome",
+        ),
+        _check_not_contains(
+            root / "apps/web/core/components/instance/not-ready-view.tsx",
+            "PlaneLockup",
+            "first_run_hides_plane_logo",
+        ),
+        _check_not_contains(
+            root / "apps/web/core/components/instance/not-ready-view.tsx",
+            "GOD_MODE_URL",
+            "first_run_avoids_stock_setup_route",
+        ),
         _check_contains(root / "apps/web/app/routes/extended.ts", "codex-fleet/onboarding", "onboarding_route"),
         _check_contains(root / "apps/web/app/routes/extended.ts", "codex-fleet/dashboard", "dashboard_route"),
         _check_contains(
@@ -334,6 +249,19 @@ def verify_plane_customization(repo: Path, source_dir: Path | None = None) -> Pl
         _check_contains(root / "apps/web/app/codex-fleet/local-api.ts", "/api/work-items/", "local_api_client"),
         _check_contains(root / "apps/web/app/codex-fleet/local-api.ts", "/api/runs", "local_api_run_client"),
         _check_contains(root / "apps/web/app/codex-fleet/local-api.ts", "/api/folders/pick", "local_api_folder_picker"),
+        _check_contains(root / "apps/web/app/codex-fleet/local-api.ts", "/api/plane/login-url", "local_api_plane_login_url"),
+        _check_contains(root / "apps/web/app/codex-fleet/local-api.ts", "/api/plane/connect", "local_api_plane_connect"),
+        _check_contains(root / "apps/web/app/codex-fleet/local-api.ts", "sessionExchangePromise", "local_api_serializes_session_exchange"),
+        _check_contains(
+            root / "apps/web/app/codex-fleet/local-session-bootstrap.tsx",
+            "ensureCodexFleetLocalConnection",
+            "local_session_bootstrap_exchanges_code",
+        ),
+        _check_contains(
+            root / "apps/web/app/root.tsx",
+            "CodexFleetLocalSessionBootstrap",
+            "root_mounts_local_session_bootstrap",
+        ),
         _check_contains(root / "apps/web/app/codex-fleet/onboarding.tsx", "CodexFleetLocalApi", "onboarding_page"),
         _check_contains(root / "apps/web/app/codex-fleet/onboarding.tsx", "Choose Folder", "onboarding_folder_picker"),
         _check_contains(root / "apps/web/app/codex-fleet/dashboard.tsx", "Run with Codex", "dashboard_run_control"),
@@ -360,8 +288,28 @@ def verify_plane_customization(repo: Path, source_dir: Path | None = None) -> Pl
         ),
         _check_contains(
             root / "apps/web/ce/components/projects/create/root.tsx",
-            "agent_task_mode",
-            "native_project_agent_task_mode",
+            "workflow_mode",
+            "native_project_workflow_mode",
+        ),
+        _check_contains(
+            root / "apps/web/ce/components/projects/create/root.tsx",
+            "Automation mode",
+            "native_project_automation_mode_label",
+        ),
+        _check_contains(
+            root / "apps/web/ce/components/projects/create/root.tsx",
+            "Max depth",
+            "native_project_max_depth_label",
+        ),
+        _check_not_contains(
+            root / "apps/web/ce/components/projects/create/root.tsx",
+            "Follow-up tasks",
+            "native_project_no_legacy_follow_up_label",
+        ),
+        _check_not_contains(
+            root / "apps/web/ce/components/projects/create/root.tsx",
+            "Max follow-up depth",
+            "native_project_no_legacy_follow_up_depth_label",
         ),
         _check_not_contains(
             root / "apps/web/ce/components/projects/create/root.tsx",
@@ -392,6 +340,11 @@ def verify_plane_customization(repo: Path, source_dir: Path | None = None) -> Pl
             root / "apps/web/ce/components/projects/create/root.tsx",
             "CodexFleetLocalApi",
             "native_project_local_api_client",
+        ),
+        _check_contains(
+            root / "apps/web/ce/components/projects/create/root.tsx",
+            "Reconnect Codex Fleet",
+            "native_project_reconnect_action",
         ),
         _check_contains(
             root / "apps/web/ce/components/projects/create/root.tsx",
@@ -466,7 +419,92 @@ def verify_plane_customization(repo: Path, source_dir: Path | None = None) -> Pl
             "work_item_modal_settings_metadata",
         ),
         _check_contains(
-            root / "packages/constants/src/settings/project.ts",
+            root / "apps/web/core/components/issues/issue-modal/form.tsx",
+            "Automation mode",
+            "work_item_modal_automation_mode_label",
+        ),
+        _check_contains(
+            root / "apps/web/core/components/issues/issue-modal/form.tsx",
+            "plan_execute",
+            "work_item_modal_plan_execute_default",
+        ),
+        _check_not_contains(
+            root / "apps/web/core/components/issues/issue-modal/form.tsx",
+            "Follow-up tasks",
+            "work_item_modal_no_legacy_follow_up_label",
+        ),
+        _check_not_contains(
+            root / "apps/web/core/components/issues/issue-modal/form.tsx",
+            "project-default",
+            "work_item_modal_no_project_default",
+        ),
+        _check_contains(
+            root / "apps/web/ce/components/sidebar/project-navigation-root.tsx",
+            "Fleet Logs",
+            "project_sidebar_fleet_logs",
+        ),
+        _check_contains(
+            root / "apps/web/ce/components/sidebar/project-navigation-root.tsx",
+            "Agents",
+            "project_sidebar_agents",
+        ),
+        _check_contains(
+            root / "apps/web/ce/components/sidebar/project-navigation-root.tsx",
+            "Runs",
+            "project_sidebar_runs",
+        ),
+        _check_contains(
+            root / "apps/web/ce/components/sidebar/project-navigation-root.tsx",
+            "Artifacts",
+            "project_sidebar_artifacts",
+        ),
+        _check_contains(
+            root / "apps/web/ce/components/sidebar/project-navigation-root.tsx",
+            "Codex Settings",
+            "project_sidebar_codex_settings",
+        ),
+        _check_file(
+            root / "apps/web/app/(all)/[workspaceSlug]/(projects)/projects/(detail)/[projectId]/fleet-logs/page.tsx",
+            "project_surface_fleet_logs_page",
+        ),
+        _check_file(
+            root / "apps/web/app/(all)/[workspaceSlug]/(projects)/projects/(detail)/[projectId]/agents/page.tsx",
+            "project_surface_agents_page",
+        ),
+        _check_file(
+            root / "apps/web/app/(all)/[workspaceSlug]/(projects)/projects/(detail)/[projectId]/runs/page.tsx",
+            "project_surface_runs_page",
+        ),
+        _check_file(
+            root / "apps/web/app/(all)/[workspaceSlug]/(projects)/projects/(detail)/[projectId]/artifacts/page.tsx",
+            "project_surface_artifacts_page",
+        ),
+        _check_file(
+            root / "apps/web/app/(all)/[workspaceSlug]/(projects)/projects/(detail)/[projectId]/codex-settings/page.tsx",
+            "project_surface_codex_settings_page",
+        ),
+        _check_contains(
+            root / "apps/web/app/codex-fleet/project-surfaces.tsx",
+            "apps/plane-codex-fleet-mission-control-v3",
+            "project_surfaces_cockpit_build_marker",
+        ),
+        _check_contains(
+            root / "apps/web/app/codex-fleet/project-surfaces.tsx",
+            "Local Mission Control",
+            "project_surfaces_command_center",
+        ),
+        _check_contains(
+            root / "apps/web/app/codex-fleet/project-surfaces.tsx",
+            "Agent roster",
+            "project_surfaces_agent_roster",
+        ),
+        _check_contains(
+            root / "apps/web/app/codex-fleet/project-surfaces.tsx",
+            "Raw settings",
+            "project_surfaces_raw_payload_hidden",
+        ),
+        _check_contains(
+            root / "apps/web/core/components/settings/project/sidebar/item-categories.tsx",
             "codex_fleet",
             "project_settings_codex_fleet_tab",
         ),
@@ -634,6 +672,17 @@ def install_branded_plane_frontend(
         _docker_checked("cp", f"{container}:{PLANE_WEB_STATIC_DIR}/.", str(backup_dir))
     _docker_checked("exec", container, "sh", "-lc", f"rm -rf {PLANE_WEB_STATIC_DIR}/*")
     _docker_checked("cp", f"{build_dir}/.", f"{container}:{PLANE_WEB_STATIC_DIR}/")
+    cache_stamp = _plane_frontend_cache_stamp(build_dir)
+    _docker_checked(
+        "exec",
+        container,
+        "sh",
+        "-lc",
+        (
+            f"manifest=$(basename $(ls {PLANE_WEB_STATIC_DIR}/assets/manifest-*.js | head -n 1)); "
+            f"sed -i \"s|/assets/$manifest|/assets/$manifest?cf={cache_stamp}|g\" {PLANE_WEB_STATIC_DIR}/index.html"
+        ),
+    )
     _docker_checked("exec", container, "sh", "-lc", "nginx -s reload")
     return PlaneFrontendReport(
         container=container,
@@ -666,6 +715,14 @@ def restore_stock_plane_frontend(repo: Path, *, container_name: str | None = Non
         installed=False,
         message="Stock Plane frontend restored.",
     )
+
+
+def _plane_frontend_cache_stamp(build_dir: Path) -> str:
+    newest = 0
+    for path in build_dir.rglob("*"):
+        if path.is_file():
+            newest = max(newest, path.stat().st_mtime_ns)
+    return str(newest or time.time_ns())
 
 
 def branded_plane_frontend_status(repo: Path, *, container_name: str | None = None) -> PlaneFrontendReport:
@@ -797,10 +854,12 @@ def write_plane_config(
         "agent": {"max_concurrent_agents": 1},
         "workspace": {"root": ".codex-fleet/workspaces"},
         "codex": {
-            "runner": "cli",
-            "command": "codex exec",
+            "runner": "app-server",
+            "command": "codex app-server",
             "approval_policy": "never",
             "sandbox_mode": "workspace-write",
+            "model": "gpt-5.5",
+            "reasoning_effort": "low",
             "turn_timeout_ms": 3_600_000,
             "stall_timeout_ms": 300_000,
         },
@@ -808,15 +867,9 @@ def write_plane_config(
             "default_doc_limit": 8000,
             "skill_limit": 4000,
             "raw_artifact_retention": "keep",
-            "compression_mode": "off",
-            "context_pack_profile": "minimal",
             "enable_rtk": False,
             "enable_caveman": False,
             "enable_repomix": False,
-            "rtk_command": "rtk",
-            "caveman_command": "caveman",
-            "repomix_command": "repomix",
-            "graphify_command": "graphify",
         },
     }
     target.write_text(yaml.safe_dump(data, sort_keys=False))
@@ -832,6 +885,13 @@ def write_plane_config(
 def open_plane(url: str) -> bool:
     if os.getenv("CODEX_FLEET_NO_BROWSER"):
         return False
+    browser = os.getenv("CODEX_FLEET_BROWSER")
+    if browser:
+        subprocess.Popen(["open", "-a", browser, url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    if shutil.which("open"):
+        subprocess.Popen(["open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
     return webbrowser.open(url, new=2)
 
 
@@ -883,7 +943,13 @@ def _source_dir(repo: Path, source_dir: Path | None) -> Path:
     return (repo.expanduser().absolute() / PLANE_SOURCE_DIR).absolute()
 
 
+def _looks_like_plane_source(root: Path) -> bool:
+    return (root / "apps" / "web").exists() and (root / "package.json").exists()
+
+
 def _git_output(cwd: Path, *args: str) -> str | None:
+    if not (cwd / ".git").exists():
+        return None
     result = subprocess.run(
         ["git", *args],
         cwd=cwd,
@@ -897,26 +963,18 @@ def _git_output(cwd: Path, *args: str) -> str | None:
     return value or None
 
 
-def _git_checked(cwd: Path, *args: str) -> None:
-    result = subprocess.run(
-        ["git", *args],
-        cwd=cwd,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise PlaneManagerError(result.stderr.strip() or f"git {' '.join(args)} failed")
-
-
 def _manifest_ref(path: Path) -> str | None:
+    return _manifest_value(path, "requested_ref")
+
+
+def _manifest_value(path: Path, key: str) -> str | None:
     if not path.exists():
         return None
     payload = yaml.safe_load(path.read_text()) or {}
     if not isinstance(payload, dict):
         return None
-    requested_ref = payload.get("requested_ref")
-    return requested_ref if isinstance(requested_ref, str) and requested_ref else None
+    value = payload.get(key)
+    return str(value) if value else None
 
 
 def _check(name: str, ok: bool, message: str) -> PlaneCustomizationCheck:

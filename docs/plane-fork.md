@@ -4,34 +4,23 @@ codex-fleet uses Plane as the product board, but the default product experience 
 
 ## Source strategy
 
-Use a pinned source checkout, not an uncontrolled vendored copy.
+Use the tracked Plane source in `apps/plane`, not an uncontrolled runtime copy.
 
-Preferred shape:
+Current shape:
 
 ```text
-third_party/plane -> git submodule pointing at the codex-fleet Plane fork
+apps/plane -> normal tracked folder in this repository
 ```
 
 The fork should start from upstream Plane and stay shallow. Use upstream Plane as the source of truth for board behavior, data models, and migrations.
 
-If a fork URL is not available yet, runtime clone support may use `.codex-fleet/plane-src` temporarily, but the product target remains a pinned fork/submodule.
-
-Clone or inspect the runtime source with:
+Verify the tracked source with:
 
 ```bash
-codex-fleet plane-source --repo . --url https://github.com/<org>/plane-codex-fleet.git --ref <pinned-commit>
-codex-fleet plane-source --repo . --status
 codex-fleet plane-verify --repo .
 ```
 
-`plane-source` writes `.codex-fleet/plane-src/.codex-fleet-plane-source.yml` with the source URL, requested ref, and current commit. This is a runtime checkout for local customization work; product releases should still pin the fork as a submodule when the fork URL is stable.
-
-Until a public fork URL exists, the codex-fleet Plane customization is preserved as `patches/plane-codex-fleet.patch` and bundled into the Python package as `codex_fleet.resources/plane-codex-fleet.patch`. `plane-source` applies this patch automatically after cloning when the checkout is not already customized. Maintainers can update or reapply it explicitly:
-
-```bash
-codex-fleet plane-patch export --repo .
-codex-fleet plane-patch apply --repo .
-```
+`apps/plane/.codex-fleet-plane-source.yml` records the source URL, requested ref, and current commit. Codex Fleet no longer clones Plane source into `.codex-fleet/plane-src` and no longer ships patch apply/export commands.
 
 The default source pin is a packaged release artifact:
 
@@ -39,20 +28,18 @@ The default source pin is a packaged release artifact:
 src/codex_fleet/resources/plane-source.lock.yml
 ```
 
-It records the upstream Plane URL, exact commit ref, patch resource, and runtime strategy. `plane-source --status` prints the lock metadata next to the local checkout manifest so maintainers can see whether `.codex-fleet/plane-src` was cloned from the expected pin. Keep this lock, `DEFAULT_PLANE_SOURCE_REF`, and the exported patch in sync when rebasing the fork.
-
-Use `--no-apply` with `plane-source` only when inspecting a clean upstream Plane checkout.
+It records the upstream Plane URL, exact commit ref, and tracked source strategy. Keep this lock and `DEFAULT_PLANE_SOURCE_REF` in sync when rebasing the fork.
 
 `plane-verify` checks the local source for codex-fleet branding, manifests, AGENTS guidance, onboarding and dashboard routes, the local API client, and the embedded work-item run panel. It is a structural check only; run the Plane web type/build checks when Node and pnpm are installed.
 
 The branded preview server also prepares the web build automatically when `apps/web/build/client/index.html` is missing:
 
-1. clone/pin Plane source under `.codex-fleet/plane-src`
-2. apply `patches/plane-codex-fleet.patch`
+1. require tracked Plane source under `apps/plane`
+2. fail if stale `.codex-fleet/plane-src` exists
 3. run `pnpm install --frozen-lockfile`
 4. run `pnpm --filter web build`
 
-This keeps the first-run path reproducible without committing a full Plane checkout or generated web build.
+This keeps the first-run path reproducible without committing generated web build output.
 
 To prepare the build without opening a browser or keeping preview/API ports open:
 
@@ -127,7 +114,7 @@ codex-fleet API must validate every project path and expose structured operation
 
 ## AGENTS.md for the fork
 
-When `third_party/plane` is added as a submodule, add an `AGENTS.md` inside that checkout with:
+`apps/plane/AGENTS.md` must preserve this boundary:
 
 ```text
 This Plane fork is customized only for codex-fleet local product UX.

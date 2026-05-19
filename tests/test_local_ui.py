@@ -39,7 +39,7 @@ def test_local_ui_runs_ready_item_to_human_review(tmp_path: Path) -> None:
     assert "codex-fleet completed run" in "\n".join(terminal["items"][0]["comments"])
 
 
-def test_local_ui_can_route_failure_to_rework(tmp_path: Path) -> None:
+def test_local_ui_can_route_failure_to_needs_input(tmp_path: Path) -> None:
     board = make_board(tmp_path)
     item_id = board.snapshot()["items"][0]["id"]
     board.move_to_ready(str(item_id))
@@ -48,10 +48,10 @@ def test_local_ui_can_route_failure_to_rework(tmp_path: Path) -> None:
     assert result["message"] == "Started fake run for LOCAL-1."
     assert result["items"][0]["state"] == "Running"
 
-    terminal = wait_for_state(board, "Rework")
+    terminal = wait_for_state(board, "Needs Input")
     assert terminal["items"][0]["run"]["status"] == "rework"
     assert terminal["items"][0]["run"]["error"] == "run failed"
-    assert "codex-fleet run failed" in "\n".join(terminal["items"][0]["comments"])
+    assert "codex-fleet needs human input" in "\n".join(terminal["items"][0]["comments"])
 
 
 def test_local_ui_http_requires_csrf_for_mutations(tmp_path: Path) -> None:

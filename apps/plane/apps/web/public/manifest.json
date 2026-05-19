@@ -1,0 +1,17 @@
+{
+  "name": "codex-fleet",
+  "short_name": "codex-fleet",
+  "icons": [
+    {
+      "src": "/codex-fleet-logo.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ],
+  "theme_color": "#0B1020",
+  "background_color": "#0B1020",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait"
+}

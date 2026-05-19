@@ -11,15 +11,13 @@ from codex_fleet.plane_manager import inspect_plane_runtime
 REQUIRED_PROJECT_VIEWS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "codex-fleet Cockpit",
-        ("Backlog", "Planning", "Ready", "Running", "Needs Input", "Human Review", "Rework", "Done", "Blocked", "Cancelled"),
+        ("Backlog", "Ready", "Planning", "Running", "Needs Input", "Human Review", "Done"),
     ),
     ("codex-fleet Ready", ("Ready",)),
     ("codex-fleet Running", ("Running",)),
     ("codex-fleet Planning", ("Planning",)),
     ("codex-fleet Needs Input", ("Needs Input",)),
     ("codex-fleet Human Review", ("Human Review",)),
-    ("codex-fleet Rework", ("Rework",)),
-    ("codex-fleet Blocked", ("Blocked",)),
     ("codex-fleet Done", ("Done",)),
     ("codex-fleet Agent proposals", ("Backlog",)),
 )
@@ -127,14 +125,12 @@ project = Project.objects.get(id=project_id, workspace=workspace)
 token = APIToken.objects.select_related("user").get(token=api_key, is_active=True)
 owner = token.user
 required = (
-    ("codex-fleet Cockpit", ("Backlog", "Planning", "Ready", "Running", "Needs Input", "Human Review", "Rework", "Done", "Blocked", "Cancelled"), ()),
+    ("codex-fleet Cockpit", ("Backlog", "Ready", "Planning", "Running", "Needs Input", "Human Review", "Done"), ()),
     ("codex-fleet Ready", ("Ready",), ()),
     ("codex-fleet Running", ("Running",), ()),
     ("codex-fleet Planning", ("Planning",), ()),
     ("codex-fleet Needs Input", ("Needs Input",), ()),
     ("codex-fleet Human Review", ("Human Review",), ()),
-    ("codex-fleet Rework", ("Rework",), ()),
-    ("codex-fleet Blocked", ("Blocked",), ()),
     ("codex-fleet Done", ("Done",), ()),
     ("codex-fleet Agent proposals", ("Backlog",), ("agent-proposed",)),
 )

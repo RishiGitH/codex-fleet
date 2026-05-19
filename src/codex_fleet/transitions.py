@@ -19,13 +19,12 @@ WORK_ITEM_TRANSITIONS: tuple[TransitionRule, ...] = (
     TransitionRule(WorkItemState.RUNNING.value, WorkItemState.PLANNING.value, "daemon", "parent_waiting", "codex-fleet created child tasks."),
     TransitionRule(WorkItemState.RUNNING.value, WorkItemState.NEEDS_INPUT.value, "daemon", "needs_input", "codex-fleet needs input."),
     TransitionRule(WorkItemState.RUNNING.value, WorkItemState.HUMAN_REVIEW.value, "daemon", "completed", "codex-fleet completed work."),
-    TransitionRule(WorkItemState.RUNNING.value, WorkItemState.REWORK.value, "daemon", "failed", "codex-fleet run failed."),
-    TransitionRule(WorkItemState.RUNNING.value, WorkItemState.BLOCKED.value, "daemon", "blocked", "codex-fleet is blocked by local setup."),
+    TransitionRule(WorkItemState.RUNNING.value, WorkItemState.NEEDS_INPUT.value, "daemon", "failed", "codex-fleet run failed and needs input."),
+    TransitionRule(WorkItemState.RUNNING.value, WorkItemState.NEEDS_INPUT.value, "daemon", "blocked", "codex-fleet is blocked by local setup."),
     TransitionRule(WorkItemState.PLANNING.value, WorkItemState.HUMAN_REVIEW.value, "daemon", "parent_children_completed", "all child tasks are ready for review."),
     TransitionRule(WorkItemState.NEEDS_INPUT.value, WorkItemState.READY.value, "human", "input_answered", "human answered codex-fleet input."),
-    TransitionRule(WorkItemState.REWORK.value, WorkItemState.READY.value, "human", "retry_requested", "codex-fleet retry requested."),
-    TransitionRule(WorkItemState.BLOCKED.value, WorkItemState.READY.value, "human", "retry_requested", "codex-fleet retry requested."),
-    TransitionRule(WorkItemState.RUNNING.value, WorkItemState.CANCELLED.value, "human", "cancelled", "codex-fleet cancelled work."),
+    TransitionRule(WorkItemState.NEEDS_INPUT.value, WorkItemState.READY.value, "human", "retry_requested", "codex-fleet retry requested."),
+    TransitionRule(WorkItemState.RUNNING.value, WorkItemState.NEEDS_INPUT.value, "human", "cancelled", "codex-fleet cancelled work."),
     TransitionRule(WorkItemState.HUMAN_REVIEW.value, WorkItemState.DONE.value, "human", "accepted", "human accepted work."),
 )
 

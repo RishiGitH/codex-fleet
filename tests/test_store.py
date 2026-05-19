@@ -14,9 +14,9 @@ def test_run_store_upserts_and_fetches_run(tmp_path: Path) -> None:
         status="running",
         branch_name="codex-fleet/CF-1",
         worktree_path="/tmp/worktree",
-        agent_role="worker",
-        agent_name="Worker",
-        agent_avatar="W",
+        agent_role="implementer",
+        agent_name="Implementer",
+        agent_avatar="I",
         settings={"approval_policy": "never"},
     )
     store.add_event("run-1", "started", {"ok": True})
@@ -33,8 +33,8 @@ def test_run_store_upserts_and_fetches_run(tmp_path: Path) -> None:
     assert run is not None
     assert run.status == "done"
     assert run.identifier == "CF-1"
-    assert run.agent_role == "worker"
-    assert run.agent_name == "Worker"
+    assert run.agent_role == "implementer"
+    assert run.agent_name == "Implementer"
     assert run.settings == {}
     assert store.list_events("run-1")[0].payload == {"ok": True}
     artifact = store.list_artifacts("run-1")[0]
@@ -92,12 +92,12 @@ def test_run_store_upserts_task_metadata(tmp_path: Path) -> None:
         parent_run_id="run-1",
         created_by_run_id="run-1",
         root_item_id="parent-1",
-        role="worker",
+        role="implementer",
         depends_on=("dep-1",),
         generation=1,
-        approval_mode="full_agent",
+        approval_mode="full_auto",
         terminal_outcome="human_review",
-        settings={"agent_task_mode": "agent_task_planner"},
+        settings={"workflow_mode": "execute_only"},
     )
 
     metadata = store.get_task_metadata("item-1")
@@ -107,9 +107,9 @@ def test_run_store_upserts_task_metadata(tmp_path: Path) -> None:
     assert metadata.depth == 1
     assert metadata.parent_item_id == "parent-1"
     assert metadata.root_item_id == "parent-1"
-    assert metadata.role == "worker"
+    assert metadata.role == "implementer"
     assert metadata.depends_on == ("dep-1",)
     assert metadata.generation == 1
-    assert metadata.approval_mode == "full_agent"
+    assert metadata.approval_mode == "full_auto"
     assert metadata.terminal_outcome == "human_review"
-    assert metadata.settings == {"agent_task_mode": "agent_task_planner"}
+    assert metadata.settings == {"workflow_mode": "execute_only"}

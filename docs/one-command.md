@@ -64,7 +64,6 @@ codex-fleet down --repo .
 For the branded local Plane fork preview:
 
 ```bash
-codex-fleet plane-source --repo . --status
 codex-fleet plane-verify --repo .
 codex-fleet plane-fork-preview --repo . --project-path /path/to/project
 ```

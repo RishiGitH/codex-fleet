@@ -67,21 +67,75 @@ def turn_start_message(
     title: str,
     approval_policy: str,
     sandbox_policy: dict[str, Any],
+    model: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> JsonRpcMessage:
+    params: dict[str, Any] = {
+        "threadId": thread_id,
+        "input": [{"type": "text", "text": prompt}],
+        "cwd": cwd,
+        "title": title,
+        "approvalPolicy": approval_policy,
+        "sandboxPolicy": sandbox_policy,
+    }
+    if model:
+        params["model"] = model
+    if reasoning_effort:
+        params["effort"] = reasoning_effort
     return JsonRpcMessage(
         {
             "method": "turn/start",
             "id": request_id,
-            "params": {
-                "threadId": thread_id,
-                "input": [{"type": "text", "text": prompt}],
-                "cwd": cwd,
-                "title": title,
-                "approvalPolicy": approval_policy,
-                "sandboxPolicy": sandbox_policy,
-            },
+            "params": params,
         }
     )
+
+
+def sandbox_policy_for_mode(mode: str, *, writable_roots: list[str] | None = None) -> dict[str, Any]:
+    if mode == "danger-full-access":
+        return {"type": "dangerFullAccess"}
+    if mode == "read-only":
+        return {"type": "readOnly", "networkAccess": False}
+    if mode == "workspace-write":
+        return {
+            "type": "workspaceWrite",
+            "networkAccess": False,
+            "writableRoots": writable_roots or [],
+            "excludeSlashTmp": False,
+            "excludeTmpdirEnvVar": False,
+        }
+    raise ProtocolError(f"Unsupported App Server sandbox mode: {mode}")
+
+
+def validate_app_server_turn_start_shape() -> None:
+    """Guard the request shape that the Codex App Server currently requires."""
+    sandbox_policy = sandbox_policy_for_mode("workspace-write", writable_roots=["/tmp/codex-fleet-protocol-check"])
+    message = turn_start_message(
+        1,
+        thread_id="thread-check",
+        prompt="protocol check",
+        cwd="/tmp/codex-fleet-protocol-check",
+        title="codex-fleet protocol check",
+        approval_policy="never",
+        sandbox_policy=sandbox_policy,
+        model="gpt-5.4-mini",
+        reasoning_effort="low",
+    )
+    params = message.payload.get("params")
+    if not isinstance(params, dict):
+        raise ProtocolError("App Server turn/start params must be an object")
+    actual_policy = params.get("sandboxPolicy")
+    if not isinstance(actual_policy, dict) or actual_policy.get("type") != "workspaceWrite":
+        raise ProtocolError("App Server sandboxPolicy must use type=workspaceWrite")
+    if "mode" in actual_policy:
+        raise ProtocolError("App Server sandboxPolicy must not use legacy mode")
+    if params.get("effort") != "low":
+        raise ProtocolError("App Server reasoning must use effort")
+    if "reasoningEffort" in params:
+        raise ProtocolError("App Server request must not use legacy reasoningEffort")
+    input_items = params.get("input")
+    if not isinstance(input_items, list) or not input_items or input_items[0].get("type") != "text":
+        raise ProtocolError("App Server input items must include type=text")
 
 
 def parse_json_line(line: str) -> dict[str, Any]:

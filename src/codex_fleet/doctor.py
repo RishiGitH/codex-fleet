@@ -6,8 +6,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from codex_fleet.budget import scan_budget
-from codex_fleet.token_tools import detect_token_tools
+from codex_fleet.project_registry import ProjectRegistry, default_project_registry_path
 
 
 @dataclass(frozen=True)
@@ -53,8 +52,40 @@ def scan_repo(repo: Path, *, codex_command: str = "codex exec") -> DoctorReport:
     missing(".env.example", "missing_env_example", "Missing .env.example.", "Document required environment variables without secrets.")
     missing("README.md", "missing_readme", "Missing README.md.", "Add setup and usage docs.")
 
-    if (repo / "pyproject.toml").exists():
-        _python_findings(repo, findings)
+    if not (repo / "apps" / "plane").exists():
+        findings.append(
+            DoctorFinding(
+                "missing_apps_plane",
+                "error",
+                "Tracked Plane product source is missing at apps/plane.",
+                "Restore apps/plane from the repository. Codex Fleet no longer recreates Plane source under .codex-fleet.",
+            )
+        )
+    if (repo / ".codex-fleet" / "plane-src").exists():
+        findings.append(
+            DoctorFinding(
+                "stale_plane_src",
+                "error",
+                "Stale Plane runtime source exists at .codex-fleet/plane-src.",
+                "Delete .codex-fleet/plane-src. Plane product source now lives at apps/plane.",
+            )
+        )
+    for stale_path in (
+        "patches/plane-codex-fleet.patch",
+        "src/codex_fleet/resources/plane-codex-fleet.patch",
+        "scripts/plane-fork-clone",
+    ):
+        if (repo / stale_path).exists():
+            findings.append(
+                DoctorFinding(
+                    "stale_plane_patch_resource",
+                    "error",
+                    f"Removed Plane patch-system resource still exists: {stale_path}.",
+                    "Delete Plane patch resources. Codex Fleet now uses tracked apps/plane source only.",
+                )
+            )
+
+    findings.extend(_registered_project_findings(repo))
 
     has_tests = any((repo / path).exists() for path in ["tests", "test", "spec", "__tests__"])
     if not has_tests:
@@ -92,38 +123,6 @@ def scan_repo(repo: Path, *, codex_command: str = "codex exec") -> DoctorReport:
             )
         )
 
-    budget = scan_budget(repo)
-    if not budget.ok:
-        findings.append(
-            DoctorFinding(
-                "context_budget_exceeded",
-                "warning",
-                f"{budget.too_large_count} guidance/context file(s) exceed configured token budgets.",
-                "Run `python -m codex_fleet budget --repo . --strict` and trim always-loaded guidance or large skills.",
-            )
-        )
-
-    if (repo / ".agents" / "skills" / "impeccable" / "scripts").exists():
-        findings.append(
-            DoctorFinding(
-                "large_frontend_skill_present",
-                "info",
-                "Large frontend skill assets are present.",
-                "Keep Impeccable opt-in for UI work and exclude its scripts from routine context packs.",
-            )
-        )
-
-    missing_optional_tools = [tool.name for tool in detect_token_tools() if not tool.available]
-    if missing_optional_tools:
-        findings.append(
-            DoctorFinding(
-                "optional_token_tools_missing",
-                "info",
-                "Some optional token/context helper tools are not installed: " + ", ".join(missing_optional_tools),
-                "No action required. codex-fleet falls back to native capture, budget, and context-pack behavior.",
-            )
-        )
-
     codex_binary = _command_binary(codex_command)
     if codex_binary and shutil.which(codex_binary) is None:
         findings.append(
@@ -137,7 +136,7 @@ def scan_repo(repo: Path, *, codex_command: str = "codex exec") -> DoctorReport:
     elif codex_binary:
         findings.extend(_codex_cli_preflight_findings(codex_command))
 
-    penalty = sum({"error": 35, "warning": 12, "info": 5}[f.severity] for f in findings)
+    penalty = sum(_finding_penalty(f) for f in findings)
     score = max(0, 100 - penalty)
     return DoctorReport(repo=repo, score=score, findings=tuple(findings))
 
@@ -170,26 +169,70 @@ def _is_git_repo(repo: Path) -> bool:
     return result.returncode == 0 and result.stdout.strip() == "true"
 
 
-def _python_findings(repo: Path, findings: list[DoctorFinding]) -> None:
-    if shutil.which("python") is None and shutil.which("python3") is not None:
-        findings.append(
+def _registered_project_findings(repo: Path) -> list[DoctorFinding]:
+    registry_path = default_project_registry_path(repo)
+    if not registry_path.exists():
+        return []
+    findings: list[DoctorFinding] = []
+    try:
+        projects = ProjectRegistry(registry_path).list_projects()
+    except Exception as exc:  # noqa: BLE001 - doctor should report broken runtime state.
+        return [
             DoctorFinding(
-                "python_command_mismatch",
-                "info",
-                "`python` was not found, but `python3` is available.",
-                "Use `make install` or `python3 -m venv .venv`; generated docs should prefer the repo Makefile or detected interpreter.",
+                "project_registry_unreadable",
+                "warning",
+                f"Local project registry could not be read: {exc}",
+                "Delete or reset .codex-fleet/projects.sqlite3 if this local runtime state is stale.",
             )
-        )
-    venv_python = repo / ".venv" / "bin" / "python"
-    if not venv_python.exists():
-        findings.append(
-            DoctorFinding(
-                "venv_not_created",
-                "info",
-                "Local `.venv` is not present.",
-                "Run `make install` before local checks; npx launcher creates its own tool venv for package-style use.",
+        ]
+    for project in projects:
+        prefix = f"Registered project {project.name!r}"
+        if not project.repo_path.exists():
+            findings.append(
+                DoctorFinding(
+                    "registered_project_missing",
+                    "info",
+                    f"{prefix} folder is missing: {project.repo_path}",
+                    "Run `codex-fleet project prune-stale --repo .` to preview cleanup, then re-run with `--apply` to remove stale local registry rows.",
+                )
             )
-        )
+            continue
+        if not _is_git_repo(project.repo_path):
+            findings.append(
+                DoctorFinding(
+                    "registered_project_not_git",
+                    "info",
+                    f"{prefix} is not a git repository.",
+                    "Initialize git if this folder should be a project, or run `codex-fleet project prune-stale --repo .` to remove stale local registry rows.",
+                )
+            )
+            continue
+        for relative in ("AGENTS.md", ".codex/config.toml", ".codex-fleet/project.json"):
+            if not (project.repo_path / relative).exists():
+                findings.append(
+                    DoctorFinding(
+                        "registered_project_harness_missing",
+                        "warning",
+                        f"{prefix} is missing harness file {relative}.",
+                        "Run the project harness apply action from Plane or `python -m codex_fleet apply-harness --repo <project>`.",
+                    )
+                )
+        if not project.plane_project_id:
+            findings.append(
+                DoctorFinding(
+                    "registered_project_plane_unlinked",
+                    "warning",
+                    f"{prefix} is not linked to a Plane project.",
+                    "Create/link the project from the Plane Add Project flow.",
+                )
+            )
+    return findings
+
+
+def _finding_penalty(finding: DoctorFinding) -> int:
+    if finding.code in {"registered_project_missing", "registered_project_not_git"}:
+        return 0
+    return {"error": 35, "warning": 12, "info": 5}[finding.severity]
 
 
 def _command_binary(command: str) -> str | None:

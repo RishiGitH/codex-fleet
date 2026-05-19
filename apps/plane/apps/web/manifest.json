@@ -1,0 +1,17 @@
+{
+  "theme_color": "#49D3FF",
+  "background_color": "#0B1020",
+  "display": "standalone",
+  "scope": "/",
+  "start_url": "/",
+  "name": "codex-fleet",
+  "short_name": "codex-fleet",
+  "description": "Local Codex agent control center for project work.",
+  "icons": [
+    {
+      "src": "/codex-fleet-logo.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml"
+    }
+  ]
+}

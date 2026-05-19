@@ -26,6 +26,7 @@ def test_doctor_scores_basic_ready_repo(tmp_path: Path) -> None:
     (tmp_path / "README.md").write_text("# Example\n")
     (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
     (tmp_path / "tests").mkdir()
+    (tmp_path / "apps" / "plane").mkdir(parents=True)
 
     report = scan_repo(tmp_path)
 
@@ -102,3 +103,74 @@ def test_doctor_reports_codex_exec_contract_change(monkeypatch, tmp_path: Path) 
     finding = next(f for f in report.findings if f.code == "codex_exec_contract_changed")
     assert "--cd" in finding.recommendation
     assert "stdin prompt" in finding.recommendation
+
+
+def test_doctor_reports_missing_apps_plane(tmp_path: Path) -> None:
+    init_git_repo(tmp_path)
+
+    report = scan_repo(tmp_path)
+
+    assert any(f.code == "missing_apps_plane" and f.severity == "error" for f in report.findings)
+
+
+def test_doctor_reports_stale_plane_src(tmp_path: Path) -> None:
+    init_git_repo(tmp_path)
+    (tmp_path / "apps" / "plane").mkdir(parents=True)
+    (tmp_path / ".codex-fleet" / "plane-src").mkdir(parents=True)
+
+    report = scan_repo(tmp_path)
+
+    assert any(f.code == "stale_plane_src" and f.severity == "error" for f in report.findings)
+
+
+def test_doctor_reports_stale_plane_patch_resources(tmp_path: Path) -> None:
+    init_git_repo(tmp_path)
+    (tmp_path / "apps" / "plane").mkdir(parents=True)
+    (tmp_path / "patches").mkdir()
+    (tmp_path / "patches" / "plane-codex-fleet.patch").write_text("stale\n")
+
+    report = scan_repo(tmp_path)
+
+    assert any(f.code == "stale_plane_patch_resource" and f.severity == "error" for f in report.findings)
+
+
+def test_doctor_checks_registered_project_harness(tmp_path: Path) -> None:
+    init_git_repo(tmp_path)
+    (tmp_path / "apps" / "plane").mkdir(parents=True)
+    project = tmp_path / "project"
+    project.mkdir()
+    init_git_repo(project)
+    from codex_fleet.project_registry import ProjectRegistry, default_project_registry_path
+
+    ProjectRegistry(default_project_registry_path(tmp_path)).add_project(project, name="Project")
+
+    report = scan_repo(tmp_path)
+
+    assert any(f.code == "registered_project_harness_missing" for f in report.findings)
+    assert any(f.code == "registered_project_plane_unlinked" for f in report.findings)
+
+
+def test_doctor_treats_stale_registered_projects_as_runtime_info(tmp_path: Path) -> None:
+    init_git_repo(tmp_path)
+    (tmp_path / "apps" / "plane").mkdir(parents=True)
+    stale = tmp_path / "stale"
+    stale.mkdir()
+    from codex_fleet.project_registry import ProjectRegistry, default_project_registry_path
+
+    registry = ProjectRegistry(default_project_registry_path(tmp_path))
+    stale_project = registry.add_project(stale, name="Stale")
+    stale.rmdir()
+    not_git = tmp_path.parent / f"{tmp_path.name}-not-git"
+    not_git.mkdir()
+    registry.add_project(not_git, name="Not Git")
+
+    report = scan_repo(tmp_path)
+    missing = next(f for f in report.findings if f.code == "registered_project_missing")
+    not_git_finding = next(f for f in report.findings if f.code == "registered_project_not_git")
+
+    assert stale_project.name in missing.message
+    assert missing.severity == "info"
+    assert "prune-stale" in missing.recommendation
+    assert not_git_finding.severity == "info"
+    assert "prune-stale" in not_git_finding.recommendation
+    assert not any("Not Git" in f.message and f.code == "registered_project_harness_missing" for f in report.findings)

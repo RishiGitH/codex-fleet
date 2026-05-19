@@ -25,9 +25,9 @@ After `.codex-fleet.yml` exists for a real Plane project, `make up` runs the con
 make plane-fork-preview
 ```
 
-This serves the already-built local Plane fork from `.codex-fleet/plane-src/apps/web/build/client` and starts the codex-fleet API on loopback. The URL token is stored in `.codex-fleet/secrets/local_api_token` and is passed in the URL fragment so it is not sent to the static web server.
+This serves the already-built local Plane fork from `apps/plane/apps/web/build/client` and starts the codex-fleet API on loopback. The URL token is stored in `.codex-fleet/secrets/local_api_token` and is passed in the URL fragment so it is not sent to the static web server.
 
-If the branded Plane web build is missing, codex-fleet prepares it automatically from the pinned Plane source and tracked patch. That preparation requires `git`, `pnpm`, and network access for the first clone/install.
+If the branded Plane web build is missing, codex-fleet prepares it automatically from the pinned `apps/plane` source. That preparation requires `pnpm` and network access for the first install.
 
 To prepare the branded Plane build without opening a browser:
 

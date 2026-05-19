@@ -6,6 +6,7 @@ from pathlib import Path
 from codex_fleet.config import AgentConfig, CodexConfig, FleetConfig, TrackerConfig, WorkspaceConfig
 from codex_fleet.daemon import DaemonStats, FleetDaemon, MultiProjectFleetDaemon
 from codex_fleet.models import WorkItem
+from codex_fleet.plane import PlaneSettings
 from codex_fleet.project_registry import ProjectRegistry
 from codex_fleet.store import RunStore
 from codex_fleet.tracker import MemoryTracker
@@ -94,7 +95,7 @@ def test_daemon_releases_stale_ready_claim_and_dispatches(tmp_path: Path) -> Non
     assert tracker.comments["1"][0].startswith("codex-fleet released a stale run claim")
 
 
-def test_daemon_reports_stale_running_claim_to_rework(tmp_path: Path) -> None:
+def test_daemon_reports_stale_running_claim_to_needs_input(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
     init_git_repo(repo)
@@ -117,7 +118,7 @@ def test_daemon_reports_stale_running_claim_to_rework(tmp_path: Path) -> None:
 
     assert result.dispatched is False
     assert result.message == "No candidate work items found."
-    assert tracker.fetch_items_by_ids(["1"])[0].state == "Rework"
+    assert tracker.fetch_items_by_ids(["1"])[0].state == "Needs Input"
     stale_run = store.get_run("stale-run")
     assert stale_run is not None
     assert stale_run.status == "stalled"
@@ -167,6 +168,44 @@ def test_daemon_moves_planning_parent_to_review_when_all_children_are_terminal(t
     assert [event.kind for event in store.list_events("parent-run")] == ["parent_children_completed"]
 
 
+def test_daemon_does_not_move_full_auto_parent_to_human_review(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    config = FleetConfig(repo=repo, workspace=WorkspaceConfig(root=tmp_path / "workspaces")).resolved()
+    store = RunStore(tmp_path / "runs.sqlite3")
+    store.upsert_task_metadata(
+        item_id="1",
+        source="human-requested",
+        depth=0,
+        settings={"workflow_mode": "full_auto"},
+    )
+    store.upsert_task_metadata(
+        item_id="2",
+        source="agent-followup",
+        depth=1,
+        parent_item_id="1",
+        parent_identifier="CF-1",
+        parent_run_id="parent-run",
+    )
+    tracker = MemoryTracker(
+        [
+            WorkItem(id="1", identifier="CF-1", title="Parent", description=None, state="Planning"),
+            WorkItem(id="2", identifier="CF-2", title="Child", description=None, state="Done"),
+        ]
+    )
+    daemon = FleetDaemon(config, fake_runner=True)
+    daemon.store = store
+    daemon.tracker = tracker
+
+    completed = daemon.reconcile_completed_parents()
+
+    assert completed == 0
+    assert tracker.fetch_items_by_ids(["1"])[0].state == "Planning"
+    assert tracker.comments.get("1") is None
+    assert store.list_events("parent-run") == []
+
+
 def test_daemon_keeps_planning_parent_blocked_when_child_needs_attention(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -201,6 +240,37 @@ def test_daemon_keeps_planning_parent_blocked_when_child_needs_attention(tmp_pat
     assert len(tracker.comments["1"]) == 1
     assert "`CF-2` is `Rework`" in tracker.comments["1"][0]
     assert [event.kind for event in store.list_events("parent-run")] == ["parent_blocked"]
+
+
+def test_daemon_deduplicates_parent_blocked_comment_without_parent_run_id(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    config = FleetConfig(repo=repo, workspace=WorkspaceConfig(root=tmp_path / "workspaces")).resolved()
+    store = RunStore(tmp_path / "runs.sqlite3")
+    store.upsert_task_metadata(
+        item_id="2",
+        source="agent-followup",
+        depth=1,
+        parent_item_id="1",
+        parent_identifier="CF-1",
+    )
+    tracker = MemoryTracker(
+        [
+            WorkItem(id="1", identifier="CF-1", title="Parent", description=None, state="Planning"),
+            WorkItem(id="2", identifier="CF-2", title="Child", description=None, state="Needs Input"),
+        ]
+    )
+    daemon = FleetDaemon(config, fake_runner=True)
+    daemon.store = store
+    daemon.tracker = tracker
+
+    daemon.reconcile_completed_parents()
+    daemon.reconcile_completed_parents()
+
+    assert len(tracker.comments["1"]) == 1
+    assert "`CF-2` is `Needs Input`" in tracker.comments["1"][0]
+    assert [event.kind for event in store.list_events("parent:1")] == ["parent_blocked"]
 
 
 def test_daemon_leaves_planning_parent_waiting_when_a_child_is_active(tmp_path: Path) -> None:
@@ -265,10 +335,21 @@ def test_multi_project_daemon_polls_registered_plane_projects(tmp_path: Path, mo
     monkeypatch.setattr("codex_fleet.daemon.load_config", lambda repo: app_config if repo == app.resolve() else control_config)
 
     class FakePlaneClient:
+        settings = PlaneSettings("http://plane.test", "key", "codex-local", "plane-control")
+
         def list_projects(self) -> list[dict[str, object]]:
             return [{"id": "plane-app", "is_member": True}]
 
-    monkeypatch.setattr("codex_fleet.daemon.build_plane_client", lambda config: FakePlaneClient())
+        def ensure_project(self, *, name: str, identifier_seed: str, external_id: str) -> dict[str, object]:
+            raise AssertionError("existing Plane project should be reused")
+
+        def join_projects(self, project_ids: list[str]) -> None:
+            raise AssertionError(f"unexpected join: {project_ids}")
+
+    monkeypatch.setattr("codex_fleet.project_reconcile.build_plane_client", lambda config: FakePlaneClient())
+    monkeypatch.setattr("codex_fleet.project_reconcile.ensure_plane_states", lambda client, active_states: type("StateResult", (), {"created_states": ()})())
+    monkeypatch.setattr("codex_fleet.project_reconcile.ensure_plane_labels", lambda client: ())
+    monkeypatch.setattr("codex_fleet.project_reconcile.write_plane_tracker_config", lambda repo, **kwargs: repo / ".codex-fleet.yml")
 
     class FakeProjectDaemon:
         def __init__(self, config: FleetConfig, **_kwargs) -> None:
@@ -289,7 +370,7 @@ def test_multi_project_daemon_polls_registered_plane_projects(tmp_path: Path, mo
     assert calls == [control.resolve(), app.resolve()]
 
 
-def test_multi_project_daemon_skips_plane_project_when_user_is_not_member(tmp_path: Path, monkeypatch) -> None:
+def test_multi_project_daemon_joins_plane_project_when_user_is_not_member(tmp_path: Path, monkeypatch) -> None:
     control = tmp_path / "control"
     app = tmp_path / "app"
     control.mkdir()
@@ -303,10 +384,19 @@ def test_multi_project_daemon_skips_plane_project_when_user_is_not_member(tmp_pa
         tracker=TrackerConfig(kind="plane", plane_workspace_slug="codex-local", plane_project_id="plane-control"),
     ).resolved()
     calls: list[Path] = []
+    joined: list[list[str]] = []
 
     class FakePlaneClient:
+        settings = PlaneSettings("http://plane.test", "key", "codex-local", "plane-control")
+
         def list_projects(self) -> list[dict[str, object]]:
             return [{"id": "plane-app", "is_member": False}]
+
+        def ensure_project(self, *, name: str, identifier_seed: str, external_id: str) -> dict[str, object]:
+            raise AssertionError("existing Plane project should be reused")
+
+        def join_projects(self, project_ids: list[str]) -> None:
+            joined.append(project_ids)
 
     class FakeProjectDaemon:
         def __init__(self, config: FleetConfig, **_kwargs) -> None:
@@ -316,16 +406,19 @@ def test_multi_project_daemon_skips_plane_project_when_user_is_not_member(tmp_pa
             calls.append(self.config.repo)
             return type("Result", (), {"dispatched": False})()
 
-    monkeypatch.setattr("codex_fleet.daemon.build_plane_client", lambda config: FakePlaneClient())
+    monkeypatch.setattr("codex_fleet.project_reconcile.build_plane_client", lambda config: FakePlaneClient())
+    monkeypatch.setattr("codex_fleet.project_reconcile.ensure_plane_states", lambda client, active_states: type("StateResult", (), {"created_states": ()})())
+    monkeypatch.setattr("codex_fleet.project_reconcile.ensure_plane_labels", lambda client: ())
+    monkeypatch.setattr("codex_fleet.project_reconcile.write_plane_tracker_config", lambda repo, **kwargs: repo / ".codex-fleet.yml")
     monkeypatch.setattr("codex_fleet.daemon.FleetDaemon", FakeProjectDaemon)
 
     daemon = MultiProjectFleetDaemon(control_config, registry=registry, fake_runner=False)
     stats = daemon.run(max_ticks=1, sleep_seconds=0)
 
     assert stats == DaemonStats(ticks=1, dispatched=0)
-    assert calls == [control.resolve()]
-    assert daemon.last_errors
-    assert "not a member" in daemon.last_errors[0].message
+    assert calls == [control.resolve(), app.resolve()]
+    assert joined == [["plane-app"]]
+    assert daemon.last_errors == []
 
 
 def test_multi_project_daemon_skips_registered_non_git_project(tmp_path: Path, monkeypatch) -> None:
@@ -378,8 +471,16 @@ def test_multi_project_daemon_skips_registered_project_when_git_root_is_stale(tm
     calls: list[Path] = []
 
     class FakePlaneClient:
+        settings = PlaneSettings("http://plane.test", "key", "codex-local", "plane-control")
+
         def list_projects(self) -> list[dict[str, object]]:
             return [{"id": "plane-app", "is_member": True}]
+
+        def ensure_project(self, *, name: str, identifier_seed: str, external_id: str) -> dict[str, object]:
+            raise AssertionError("stale git project should be skipped before Plane project creation")
+
+        def join_projects(self, project_ids: list[str]) -> None:
+            raise AssertionError(f"unexpected join: {project_ids}")
 
     class FakeProjectDaemon:
         def __init__(self, config: FleetConfig, **_kwargs) -> None:
@@ -389,7 +490,7 @@ def test_multi_project_daemon_skips_registered_project_when_git_root_is_stale(tm
             calls.append(self.config.repo)
             return type("Result", (), {"dispatched": False})()
 
-    monkeypatch.setattr("codex_fleet.daemon.build_plane_client", lambda config: FakePlaneClient())
+    monkeypatch.setattr("codex_fleet.project_reconcile.build_plane_client", lambda config: FakePlaneClient())
     monkeypatch.setattr("codex_fleet.daemon.FleetDaemon", FakeProjectDaemon)
 
     daemon = MultiProjectFleetDaemon(control_config, registry=registry, fake_runner=False)
@@ -424,8 +525,16 @@ def test_multi_project_daemon_synthesizes_plane_config_when_registered_project_c
     seen_configs: list[FleetConfig] = []
 
     class FakePlaneClient:
+        settings = PlaneSettings("http://plane.test", "key", "codex-local", "plane-control")
+
         def list_projects(self) -> list[dict[str, object]]:
             return [{"id": "plane-app", "is_member": True}]
+
+        def ensure_project(self, *, name: str, identifier_seed: str, external_id: str) -> dict[str, object]:
+            raise AssertionError("existing Plane project should be reused")
+
+        def join_projects(self, project_ids: list[str]) -> None:
+            raise AssertionError(f"unexpected join: {project_ids}")
 
     class FakeProjectDaemon:
         def __init__(self, config: FleetConfig, **_kwargs) -> None:
@@ -435,7 +544,10 @@ def test_multi_project_daemon_synthesizes_plane_config_when_registered_project_c
             seen_configs.append(self.config)
             return type("Result", (), {"dispatched": False})()
 
-    monkeypatch.setattr("codex_fleet.daemon.build_plane_client", lambda config: FakePlaneClient())
+    monkeypatch.setattr("codex_fleet.project_reconcile.build_plane_client", lambda config: FakePlaneClient())
+    monkeypatch.setattr("codex_fleet.project_reconcile.ensure_plane_states", lambda client, active_states: type("StateResult", (), {"created_states": ()})())
+    monkeypatch.setattr("codex_fleet.project_reconcile.ensure_plane_labels", lambda client: ())
+    monkeypatch.setattr("codex_fleet.project_reconcile.write_plane_tracker_config", lambda repo, **kwargs: repo / ".codex-fleet.yml")
     monkeypatch.setattr("codex_fleet.daemon.FleetDaemon", FakeProjectDaemon)
 
     stats = MultiProjectFleetDaemon(control_config, registry=registry, fake_runner=False).run(max_ticks=1, sleep_seconds=0)
@@ -467,8 +579,16 @@ def test_multi_project_daemon_dedupes_duplicate_plane_project_mapping(tmp_path: 
     calls: list[Path] = []
 
     class FakePlaneClient:
+        settings = PlaneSettings("http://plane.test", "key", "codex-local", "plane-control")
+
         def list_projects(self) -> list[dict[str, object]]:
             return [{"id": "plane-app", "is_member": True}]
+
+        def ensure_project(self, *, name: str, identifier_seed: str, external_id: str) -> dict[str, object]:
+            raise AssertionError("existing Plane project should be reused")
+
+        def join_projects(self, project_ids: list[str]) -> None:
+            raise AssertionError(f"unexpected join: {project_ids}")
 
     class FakeProjectDaemon:
         def __init__(self, config: FleetConfig, **_kwargs) -> None:
@@ -478,7 +598,10 @@ def test_multi_project_daemon_dedupes_duplicate_plane_project_mapping(tmp_path: 
             calls.append(self.config.repo)
             return type("Result", (), {"dispatched": False})()
 
-    monkeypatch.setattr("codex_fleet.daemon.build_plane_client", lambda config: FakePlaneClient())
+    monkeypatch.setattr("codex_fleet.project_reconcile.build_plane_client", lambda config: FakePlaneClient())
+    monkeypatch.setattr("codex_fleet.project_reconcile.ensure_plane_states", lambda client, active_states: type("StateResult", (), {"created_states": ()})())
+    monkeypatch.setattr("codex_fleet.project_reconcile.ensure_plane_labels", lambda client: ())
+    monkeypatch.setattr("codex_fleet.project_reconcile.write_plane_tracker_config", lambda repo, **kwargs: repo / ".codex-fleet.yml")
     monkeypatch.setattr("codex_fleet.daemon.FleetDaemon", FakeProjectDaemon)
 
     daemon = MultiProjectFleetDaemon(control_config, registry=registry, fake_runner=False)

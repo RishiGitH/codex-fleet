@@ -1,0 +1,6 @@
+source_url: https://github.com/makeplane/plane.git
+requested_ref: 4c1bdd1d625fa3f1141e8af9c15423946472069e
+current_commit: 4c1bdd1d625fa3f1141e8af9c15423946472069e
+lock_source_url: https://github.com/makeplane/plane.git
+lock_ref: 4c1bdd1d625fa3f1141e8af9c15423946472069e
+notes: Tracked Plane product source for codex-fleet customization.

@@ -15,20 +15,27 @@ from codex_fleet.plane_preview import (
 
 
 def test_plane_preview_requires_built_web_client(tmp_path: Path) -> None:
+    _write_plane_source_marker(tmp_path)
+
     with pytest.raises(PlanePreviewError, match="Plane web build not found"):
+        create_plane_preview_server(tmp_path, port=0, auto_prepare=False)
+
+
+def test_plane_preview_requires_apps_plane(tmp_path: Path) -> None:
+    with pytest.raises(PlanePreviewError, match="apps/plane"):
         create_plane_preview_server(tmp_path, port=0, auto_prepare=False)
 
 
 def test_plane_preview_auto_prepares_missing_build(monkeypatch, tmp_path: Path) -> None:
     build_dir = default_plane_build_dir(tmp_path)
-    source_dir = tmp_path / ".codex-fleet" / "plane-src"
+    source_dir = tmp_path / "apps" / "plane"
     calls: list[tuple[str, ...]] = []
 
     class Source:
         def __init__(self) -> None:
             self.source_dir = source_dir
 
-    monkeypatch.setattr("codex_fleet.plane_preview.ensure_plane_source", lambda _repo: Source())
+    monkeypatch.setattr("codex_fleet.plane_preview.require_plane_source", lambda _repo: Source())
     monkeypatch.setattr("codex_fleet.plane_preview.shutil.which", lambda _binary: "/usr/bin/pnpm")
 
     def fake_run(command, **_kwargs):  # type: ignore[no-untyped-def]
@@ -56,6 +63,7 @@ def test_plane_preview_auto_prepares_missing_build(monkeypatch, tmp_path: Path) 
 
 
 def test_plane_preview_serves_spa_fallback(tmp_path: Path) -> None:
+    _write_plane_source_marker(tmp_path)
     build_dir = default_plane_build_dir(tmp_path)
     build_dir.mkdir(parents=True)
     (build_dir / "index.html").write_text("<h1>codex-fleet</h1>\n")
@@ -72,3 +80,9 @@ def test_plane_preview_serves_spa_fallback(tmp_path: Path) -> None:
     finally:
         server.shutdown()
         thread.join(timeout=5)
+
+
+def _write_plane_source_marker(repo: Path) -> None:
+    source = repo / "apps" / "plane"
+    (source / "apps" / "web").mkdir(parents=True)
+    (source / "package.json").write_text("{}\n")
