@@ -46,12 +46,25 @@ GET  /api/plane/login
 POST /api/onboarding/local-bootstrap
 GET  /api/projects
 GET  /api/projects/:id
+GET  /api/projects/:id/agent-analytics
+GET  /api/projects/:id/control-plane-status
 POST /api/projects
 POST /api/projects/:id/harness/plan
 POST /api/projects/:id/harness/apply
 GET  /api/runs
 POST /api/runs
 GET  /api/runs/:id
+GET  /api/runs/:id/events
+GET  /api/runs/:id/artifacts/:artifact_id
+POST /api/runs/:id/retry
+POST /api/runs/:id/cancel
+GET  /api/work-items/:plane_id/children
+GET  /api/work-items/:plane_id/parent
+POST /api/work-items/:plane_id/answer-input
+POST /api/work-items/:plane_id/settings
+POST /api/work-items/:plane_id/plan
+POST /api/work-items/:plane_id/retry
+POST /api/work-items/:plane_id/cancel
 POST /api/runs/next-ready
 GET  /api/events
 GET  /api/work-items/ready
@@ -182,7 +195,29 @@ When the repo is still using the memory tracker, the local API stores those fall
 
 For Plane-backed projects this endpoint returns an error; the work item source of truth is Plane.
 
-`GET /api/runs/:id` and `GET /api/work-items/:plane_id/run-status` return the stored run plus append-only `events` and `artifacts`. Events record orchestration boundaries such as claim, workspace preparation, runner start/finish, completion, and failure. Artifacts are local file paths produced by the runner, such as fake-run markers or captured logs.
+`GET /api/runs/:id` and `GET /api/work-items/:plane_id/run-status` return the stored run plus append-only `events` and `artifacts`. Runs also include agent/model/settings metadata when available: `agent_role`, `agent_name`, `agent_avatar`, `runner_name`, `model`, `settings`, and `token_usage`. Events record orchestration boundaries such as claim, workspace preparation, runner start/finish, completion, input requests, child task creation, parent blocking, retry, and cancellation. Artifacts include local path, kind, size, SHA-256 when available, and redaction class.
+
+`GET /api/runs/:id/events` returns only the run's ordered event timeline.
+
+`GET /api/runs/:id/artifacts/:artifact_id` streams a local artifact only when it is inside the project repo or recorded worktree path. It rejects path traversal and outside-root paths.
+
+`GET /api/projects/:id/agent-analytics` returns local run analytics grouped by agent role, including success/failure/active/cancelled counts, token totals when available, and recent events. This endpoint is codex-fleet's agent visibility surface; it does not depend on Plane's built-in analytics.
+
+`GET /api/projects/:id/control-plane-status` returns local readiness for API, daemon store, Plane connectivity, runner command, and local auth.
+
+`GET /api/work-items/:plane_id/children` returns codex-fleet task metadata for child work items created from the parent.
+
+`GET /api/work-items/:plane_id/parent` returns codex-fleet task metadata linking the item back to the parent that created it, when present.
+
+`POST /api/work-items/:plane_id/answer-input` accepts `{ "answer": "..." }`, posts the answer as a comment, and moves the item back to Ready.
+
+`POST /api/work-items/:plane_id/settings` persists per-task codex-fleet settings in local metadata so the task does not need to rely only on hidden description HTML.
+
+`POST /api/work-items/:plane_id/plan` moves the item to Ready, stores Full Agent planner settings, and dispatches that item as a planner run.
+
+`POST /api/work-items/:plane_id/retry` releases the latest claim when present, records a retry event, comments in Plane, and moves the item back to Ready. If the latest run was still active, it is marked cancelled with a retry note.
+
+`POST /api/work-items/:plane_id/cancel` records `cancel_requested`, marks the latest run cancelled when present, releases the latest claim, comments in Plane, and moves the item to Cancelled. `POST /api/runs/:id/cancel` performs the same operation from a known run id.
 
 `GET /api/events?limit=100` returns recent run events across the local repo-scoped run store. The optional limit is clamped to a safe range.
 

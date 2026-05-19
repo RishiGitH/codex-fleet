@@ -3,7 +3,13 @@ import sys
 from pathlib import Path
 
 from codex_fleet.models import WorkItem
-from codex_fleet.runner import CodexCliRunner, check_codex_cli_preflight, parse_proposed_tasks
+from codex_fleet.runner import (
+    CodexCliRunner,
+    check_codex_cli_preflight,
+    parse_needs_input,
+    parse_proposed_tasks,
+    parse_token_usage,
+)
 
 
 def test_codex_cli_runner_executes_command_in_workspace(tmp_path: Path) -> None:
@@ -47,6 +53,35 @@ def test_codex_cli_runner_reports_failure(tmp_path: Path) -> None:
     assert result.artifacts[0].name == ".codex-fleet-codex-cli-output.txt"
 
 
+def test_codex_cli_runner_extracts_token_usage(tmp_path: Path) -> None:
+    _init_git_repo(tmp_path)
+    fake_cli = tmp_path / "fake_codex_cli.py"
+    fake_cli.write_text(
+        "import sys\n"
+        "sys.stdin.read()\n"
+        "print('done')\n"
+        "print('Token usage: input_tokens=1,234 output_tokens=56 total_tokens=1,290')\n"
+    )
+    runner = CodexCliRunner(command=f"{sys.executable} {fake_cli}", timeout_seconds=5)
+    item = WorkItem(id="1", identifier="CF-1", title="Use CLI", description=None, state="Ready")
+
+    result = runner.run(item, tmp_path)
+
+    assert result.token_usage is not None
+    assert result.token_usage.input_tokens == 1234
+    assert result.token_usage.output_tokens == 56
+    assert result.token_usage.total_tokens == 1290
+
+
+def test_parse_token_usage_from_json_line() -> None:
+    usage = parse_token_usage('{"usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}}\n')
+
+    assert usage is not None
+    assert usage.input_tokens == 10
+    assert usage.output_tokens == 5
+    assert usage.total_tokens == 15
+
+
 def test_codex_cli_runner_streams_output_to_terminal_and_artifact(tmp_path: Path, capsys) -> None:
     _init_git_repo(tmp_path)
     fake_cli = tmp_path / "fake_codex_cli.py"
@@ -84,6 +119,37 @@ def test_parse_proposed_tasks_from_codex_output() -> None:
     assert len(tasks) == 1
     assert tasks[0].title == "Add browser verification"
     assert tasks[0].labels == ("agent-proposed",)
+
+
+def test_parse_proposed_tasks_supports_full_agent_metadata() -> None:
+    output = """done
+```codex-fleet-proposed-tasks
+[
+  {"title": "Review security", "role": "security_reviewer", "depends_on": ["CF-2"], "suggested_state": "Ready", "labels": ["security"]}
+]
+```
+"""
+
+    tasks = parse_proposed_tasks(output)
+
+    assert len(tasks) == 1
+    assert tasks[0].role == "security_reviewer"
+    assert tasks[0].depends_on == ("CF-2",)
+    assert tasks[0].suggested_state == "Ready"
+    assert "security" in tasks[0].labels
+
+
+def test_parse_needs_input_from_codex_output() -> None:
+    output = """blocked
+```codex-fleet-needs-input
+{"question": "Which deployment target should I use?", "needed_to_continue": true}
+```
+"""
+
+    needs_input = parse_needs_input(output)
+
+    assert needs_input is not None
+    assert needs_input.question == "Which deployment target should I use?"
 
 
 def test_codex_cli_runner_blocks_missing_auth_before_running(monkeypatch, tmp_path: Path) -> None:

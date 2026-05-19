@@ -41,3 +41,17 @@ def test_capture_cli_propagates_exit_code_and_writes_raw(tmp_path: Path) -> None
     artifacts = sorted((tmp_path / ".codex-fleet" / "artifacts").glob("*/raw.txt"))
     assert artifacts
     assert "bad" in artifacts[-1].read_text()
+
+
+def test_capture_command_can_write_native_compressed_output(tmp_path: Path) -> None:
+    result = capture_command(
+        tmp_path,
+        (sys.executable, "-c", "print('start'); print('Traceback: nope'); print('end')"),
+        compression_mode="native",
+    )
+
+    assert result.compressed_path is not None
+    compressed = result.compressed_path.read_text()
+    assert "Traceback: nope" in compressed
+    metadata = json.loads(result.metadata_path.read_text())
+    assert metadata["compressed_path"] == str(result.compressed_path)

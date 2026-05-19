@@ -71,6 +71,9 @@ def test_plan_harness_detects_python_commands_and_status(tmp_path: Path) -> None
     assert plan.scan.typecheck_command == "mypy ."
     assert plan.scan.build_command == "python -m build"
     assert "git worktree has uncommitted changes" in plan.scan.warnings
+    agents = next(file for file in plan.files if str(file.path) == "AGENTS.md")
+    assert "- Test: `pytest`" in agents.content
+    assert "- Lint: `ruff check .`" in agents.content
 
 
 def test_plan_harness_blocks_non_git_repo(tmp_path: Path) -> None:

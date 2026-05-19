@@ -52,14 +52,15 @@ class HarnessPlan:
 
 def plan_harness(repo: Path) -> HarnessPlan:
     repo = repo.expanduser().resolve()
+    scan = _scan_repo(repo)
     files = [
-        _file(repo, "AGENTS.md", _agents_md()),
+        _file(repo, "AGENTS.md", _agents_md(scan)),
         _file(repo, "WORKFLOW.md", _workflow_md()),
         _file(repo, ".codex/config.toml", _codex_config()),
         _file(repo, ".codex/agents/code-scout.toml", _code_scout_agent()),
         _file(repo, ".agents/skills/repo-harness-review/SKILL.md", _repo_harness_skill()),
     ]
-    return HarnessPlan(repo=repo, files=tuple(files), scan=_scan_repo(repo))
+    return HarnessPlan(repo=repo, files=tuple(files), scan=scan)
 
 
 def apply_harness(repo: Path, *, overwrite: bool = False) -> list[Path]:
@@ -269,14 +270,15 @@ def _go_commands(repo: Path) -> dict[str, str | None]:
     return {"test": "go test ./...", "build": "go build ./..."}
 
 
-def _agents_md() -> str:
-    return """# AGENTS.md
+def _agents_md(scan: HarnessScan) -> str:
+    commands = _detected_command_block(scan)
+    return f"""# AGENTS.md
 
 This repo is configured for Codex.
 
 ## Commands
 
-Document install, test, lint, and run commands here.
+{commands}
 
 ## Rules
 
@@ -288,6 +290,21 @@ Document install, test, lint, and run commands here.
 - If more work is discovered, propose follow-up Plane tasks as `agent-proposed`
   instead of silently widening scope.
 """
+
+
+def _detected_command_block(scan: HarnessScan) -> str:
+    rows = [
+        ("Install", scan.install_command),
+        ("Test", scan.test_command),
+        ("Lint", scan.lint_command),
+        ("Typecheck", scan.typecheck_command),
+        ("Build", scan.build_command),
+        ("Dev", scan.dev_command),
+    ]
+    detected = [f"- {label}: `{command}`" for label, command in rows if command]
+    if detected:
+        return "\n".join(detected)
+    return "Document install, test, lint, typecheck, build, and run commands here."
 
 
 def _workflow_md() -> str:

@@ -14,6 +14,10 @@ def test_run_store_upserts_and_fetches_run(tmp_path: Path) -> None:
         status="running",
         branch_name="codex-fleet/CF-1",
         worktree_path="/tmp/worktree",
+        agent_role="worker",
+        agent_name="Worker",
+        agent_avatar="W",
+        settings={"approval_policy": "never"},
     )
     store.add_event("run-1", "started", {"ok": True})
     store.add_artifact("run-1", "/tmp/worktree/.codex-fleet-fake-run.txt")
@@ -29,8 +33,13 @@ def test_run_store_upserts_and_fetches_run(tmp_path: Path) -> None:
     assert run is not None
     assert run.status == "done"
     assert run.identifier == "CF-1"
+    assert run.agent_role == "worker"
+    assert run.agent_name == "Worker"
+    assert run.settings == {}
     assert store.list_events("run-1")[0].payload == {"ok": True}
-    assert store.list_artifacts("run-1")[0].path == "/tmp/worktree/.codex-fleet-fake-run.txt"
+    artifact = store.list_artifacts("run-1")[0]
+    assert artifact.path == "/tmp/worktree/.codex-fleet-fake-run.txt"
+    assert artifact.redaction == "local"
 
 
 def test_run_store_releases_only_stale_active_claims(tmp_path: Path) -> None:
@@ -48,6 +57,9 @@ def test_run_store_releases_only_stale_active_claims(tmp_path: Path) -> None:
     assert [claim.item_id for claim in stale] == ["item-old"]
     assert store.try_claim_item("item-old", "run-new") is True
     assert store.try_claim_item("item-fresh", "run-other") is False
+    claim = store.get_claim("item-fresh")
+    assert claim is not None
+    assert claim.status == "active"
 
 
 def test_run_store_updates_run_status(tmp_path: Path) -> None:
@@ -79,6 +91,12 @@ def test_run_store_upserts_task_metadata(tmp_path: Path) -> None:
         parent_identifier="CF-1",
         parent_run_id="run-1",
         created_by_run_id="run-1",
+        root_item_id="parent-1",
+        role="worker",
+        depends_on=("dep-1",),
+        generation=1,
+        approval_mode="full_agent",
+        terminal_outcome="human_review",
         settings={"agent_task_mode": "agent_task_planner"},
     )
 
@@ -88,4 +106,10 @@ def test_run_store_upserts_task_metadata(tmp_path: Path) -> None:
     assert metadata.source == "agent-followup"
     assert metadata.depth == 1
     assert metadata.parent_item_id == "parent-1"
+    assert metadata.root_item_id == "parent-1"
+    assert metadata.role == "worker"
+    assert metadata.depends_on == ("dep-1",)
+    assert metadata.generation == 1
+    assert metadata.approval_mode == "full_agent"
+    assert metadata.terminal_outcome == "human_review"
     assert metadata.settings == {"agent_task_mode": "agent_task_planner"}

@@ -33,6 +33,14 @@ def codex_settings_from_work_item(item: WorkItem) -> dict[str, Any]:
     settings = {key: value for key, value in parsed.items() if key != "skills"}
     if settings.get("agent_task_mode") == "project-default":
         settings.pop("agent_task_mode", None)
+    if settings.get("automation_mode") == "project-default":
+        settings.pop("automation_mode", None)
+    if "agent_task_mode" in settings and "automation_mode" not in settings:
+        settings["automation_mode"] = {
+            "manual": "manual",
+            "review_and_approve": "assisted",
+            "agent_task_planner": "full_agent",
+        }.get(str(settings["agent_task_mode"]), "assisted")
     return settings
 
 
@@ -46,17 +54,73 @@ def merged_work_item_settings(
         metadata = store.get_task_metadata(item.id)
         if metadata is not None:
             metadata_settings = metadata.settings
-    return normalize_codex_settings(
+    settings = normalize_codex_settings(
         {
             **(base_settings or {}),
             **metadata_settings,
             **codex_settings_from_work_item(item),
         }
     )
+    role = resolve_agent_role(item, store)
+    role_settings = _role_profile_settings(settings, role)
+    return normalize_codex_settings({**settings, **role_settings, "agent_role": role})
+
+
+def resolve_agent_role(item: WorkItem, store: RunStore | None = None) -> str:
+    if store is not None:
+        metadata = store.get_task_metadata(item.id)
+        if metadata is not None and metadata.role:
+            return _normalize_role(metadata.role)
+    labels = {label.lower() for label in item.labels}
+    if "agent-lead" in labels:
+        return "lead"
+    if "agent-planner" in labels:
+        return "planner"
+    if "agent-code_scout" in labels or "agent-code-scout" in labels or "agent-scout" in labels:
+        return "code_scout"
+    if "agent-security_reviewer" in labels or "agent-security-reviewer" in labels:
+        return "security_reviewer"
+    if "agent-token_reviewer" in labels or "agent-token-reviewer" in labels:
+        return "token_reviewer"
+    if "agent-harness_reviewer" in labels or "agent-harness-reviewer" in labels:
+        return "harness_reviewer"
+    if "agent-reviewer" in labels:
+        return "reviewer"
+    if "agent-worker" in labels:
+        return "worker"
+    return "worker"
 
 
 def settings_value(settings: dict[str, Any] | None, key: str) -> object:
     return normalize_codex_settings(settings).get(key, DEFAULT_CODEX_SETTINGS[key])
+
+
+def _normalize_role(role: str) -> str:
+    return role.strip().lower().replace("-", "_") or "worker"
+
+
+def _role_profile_settings(settings: dict[str, Any], role: str) -> dict[str, Any]:
+    subagents = settings.get("subagents")
+    if not isinstance(subagents, dict):
+        return {}
+    aliases = {
+        "lead": "implementer",
+        "planner": "code_scout",
+        "worker": "implementer",
+        "reviewer": "harness_reviewer",
+    }
+    profile_name = role if role in subagents else aliases.get(role, role)
+    profile = subagents.get(profile_name)
+    if not isinstance(profile, dict):
+        return {}
+    mapped: dict[str, Any] = {}
+    if isinstance(profile.get("model"), str):
+        mapped["default_model"] = profile["model"]
+    if isinstance(profile.get("reasoning_effort"), str):
+        mapped["reasoning_effort"] = profile["reasoning_effort"]
+    if isinstance(profile.get("sandbox_mode"), str):
+        mapped["sandbox_mode"] = profile["sandbox_mode"]
+    return mapped
 
 
 def config_with_codex_settings(config: FleetConfig, settings: dict[str, Any] | None) -> FleetConfig:

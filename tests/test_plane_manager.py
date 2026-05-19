@@ -26,7 +26,7 @@ from codex_fleet.plane_manager import (
 def test_write_plane_config_uses_plane_ready_only(tmp_path: Path) -> None:
     path = write_plane_config(
         tmp_path,
-        base_url="http://127.0.0.1:8080",
+        base_url="http://127.0.0.1:17880",
         workspace_slug="local",
         project_id="project-id",
         api_key_ref="literal-key",
@@ -37,7 +37,7 @@ def test_write_plane_config_uses_plane_ready_only(tmp_path: Path) -> None:
     assert path == tmp_path / ".codex-fleet.yml"
     assert config.tracker.kind == "plane"
     assert config.tracker.active_states == ["Ready"]
-    assert config.tracker.plane_base_url == "http://127.0.0.1:8080"
+    assert config.tracker.plane_base_url == "http://127.0.0.1:17880"
     assert config.tracker.plane_api_key == "literal-key"
     assert config.tracker.plane_workspace_slug == "local"
     assert config.tracker.plane_project_id == "project-id"
@@ -140,7 +140,7 @@ def test_plane_runtime_config_restarts_stale_running_api_env(monkeypatch, tmp_pa
     (runtime / "setup.sh").write_text("#!/usr/bin/env bash\n")
     (app_dir / "docker-compose.yaml").write_text("services: {}\n")
     (app_dir / "plane.env").write_text(
-        "APP_DOMAIN=127.0.0.1:8080\nLISTEN_HTTP_PORT=8080\nAPI_KEY_RATE_LIMIT=1000/minute\n"
+        "APP_DOMAIN=127.0.0.1:17880\nLISTEN_HTTP_PORT=8080\nAPI_KEY_RATE_LIMIT=1000/minute\n"
     )
     commands: list[list[str]] = []
 
@@ -160,7 +160,7 @@ def test_plane_runtime_config_restarts_stale_running_api_env(monkeypatch, tmp_pa
 
     monkeypatch.setattr("subprocess.run", fake_run)
 
-    changed = ensure_plane_runtime_config(tmp_path, url="http://127.0.0.1:8080")
+    changed = ensure_plane_runtime_config(tmp_path, url="http://127.0.0.1:17880")
 
     assert changed is True
     restart_command = next(command for command in commands if command[-3:] == ["api", "worker", "beat-worker"])
@@ -375,6 +375,8 @@ def test_ensure_plane_source_clones_pins_and_writes_manifest(monkeypatch, tmp_pa
     assert "patch_resource: plane-codex-fleet.patch" in manifest
     assert ["git", "fetch", "--depth", "1", "origin", "abc123"] in calls
     assert ["git", "checkout", "abc123"] in calls
+    assert ["git", "reset", "--hard", "abc123"] in calls
+    assert ["git", "clean", "-fd"] in calls
 
 
 def test_verify_plane_customization_reports_required_branding(tmp_path: Path) -> None:
@@ -462,6 +464,12 @@ def test_verify_plane_customization_reports_required_branding(tmp_path: Path) ->
     (root / "apps/web/public/site.webmanifest.json").write_text(manifest)
     (root / "apps/web/manifest.json").write_text(manifest)
     (root / "apps/web/public/sw.js").write_text("registration.unregister\n")
+    (root / "apps/web/app/entry.client.tsx").write_text("@/lib/polyfills\n")
+    (root / "apps/web/core/components/issues").mkdir(parents=True, exist_ok=True)
+    (root / "apps/web/core/components/issues/filters.tsx").write_text("Fleet Logs\n")
+    (root / "apps/web/core/components/analytics/work-items/modal").mkdir(parents=True)
+    (root / "apps/web/core/components/analytics/work-items/modal/header.tsx").write_text("Fleet Logs for\n")
+    (root / "apps/web/core/components/analytics/work-items/modal/content.tsx").write_text("Task tree\n")
 
     report = verify_plane_customization(tmp_path)
 
@@ -664,6 +672,12 @@ def test_plane_customization_patch_apply_is_idempotent(tmp_path: Path) -> None:
     (source / "apps/web/public/manifest.json").write_text(manifest)
     (source / "apps/web/public/site.webmanifest.json").write_text(manifest)
     (source / "apps/web/public/sw.js").write_text("registration.unregister\n")
+    (source / "apps/web/app/entry.client.tsx").write_text("@/lib/polyfills\n")
+    (source / "apps/web/core/components/issues").mkdir(parents=True, exist_ok=True)
+    (source / "apps/web/core/components/issues/filters.tsx").write_text("Fleet Logs\n")
+    (source / "apps/web/core/components/analytics/work-items/modal").mkdir(parents=True, exist_ok=True)
+    (source / "apps/web/core/components/analytics/work-items/modal/header.tsx").write_text("Fleet Logs for\n")
+    (source / "apps/web/core/components/analytics/work-items/modal/content.tsx").write_text("Task tree\n")
     patch = tmp_path / "noop.patch"
     patch.write_text("")
 

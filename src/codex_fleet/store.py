@@ -15,6 +15,13 @@ class StoredRun:
     status: str
     branch_name: str | None
     worktree_path: str | None
+    runner_name: str | None
+    agent_role: str | None
+    agent_name: str | None
+    agent_avatar: str | None
+    model: str | None
+    settings: dict[str, Any]
+    token_usage: dict[str, Any]
     error: str | None
 
 
@@ -33,6 +40,9 @@ class StoredArtifact:
     run_id: str
     path: str
     kind: str
+    size_bytes: int | None
+    sha256: str | None
+    redaction: str
     created_at: str
 
 
@@ -54,6 +64,12 @@ class TaskMetadata:
     parent_identifier: str | None
     parent_run_id: str | None
     created_by_run_id: str | None
+    root_item_id: str | None
+    role: str | None
+    depends_on: tuple[str, ...]
+    generation: int
+    approval_mode: str | None
+    terminal_outcome: str | None
     settings: dict[str, Any]
     created_at: str
     updated_at: str
@@ -81,12 +97,26 @@ class RunStore:
                     status text not null,
                     branch_name text,
                     worktree_path text,
+                    runner_name text,
+                    agent_role text,
+                    agent_name text,
+                    agent_avatar text,
+                    model text,
+                    settings text not null default '{}',
+                    token_usage text not null default '{}',
                     error text,
                     created_at text default current_timestamp,
                     updated_at text default current_timestamp
                 )
                 """
             )
+            _ensure_column(db, "runs", "runner_name", "text")
+            _ensure_column(db, "runs", "agent_role", "text")
+            _ensure_column(db, "runs", "agent_name", "text")
+            _ensure_column(db, "runs", "agent_avatar", "text")
+            _ensure_column(db, "runs", "model", "text")
+            _ensure_column(db, "runs", "settings", "text not null default '{}'")
+            _ensure_column(db, "runs", "token_usage", "text not null default '{}'")
             db.execute(
                 """
                 create table if not exists events (
@@ -116,10 +146,16 @@ class RunStore:
                     run_id text not null,
                     path text not null,
                     kind text not null,
+                    size_bytes integer,
+                    sha256 text,
+                    redaction text not null default 'local',
                     created_at text default current_timestamp
                 )
                 """
             )
+            _ensure_column(db, "artifacts", "size_bytes", "integer")
+            _ensure_column(db, "artifacts", "sha256", "text")
+            _ensure_column(db, "artifacts", "redaction", "text not null default 'local'")
             db.execute(
                 """
                 create table if not exists task_metadata (
@@ -130,12 +166,24 @@ class RunStore:
                     parent_identifier text,
                     parent_run_id text,
                     created_by_run_id text,
+                    root_item_id text,
+                    role text,
+                    depends_on text not null default '[]',
+                    generation integer not null default 0,
+                    approval_mode text,
+                    terminal_outcome text,
                     settings text not null default '{}',
                     created_at text default current_timestamp,
                     updated_at text default current_timestamp
                 )
                 """
             )
+            _ensure_column(db, "task_metadata", "root_item_id", "text")
+            _ensure_column(db, "task_metadata", "role", "text")
+            _ensure_column(db, "task_metadata", "depends_on", "text not null default '[]'")
+            _ensure_column(db, "task_metadata", "generation", "integer not null default 0")
+            _ensure_column(db, "task_metadata", "approval_mode", "text")
+            _ensure_column(db, "task_metadata", "terminal_outcome", "text")
 
     def upsert_run(
         self,
@@ -146,21 +194,53 @@ class RunStore:
         status: str,
         branch_name: str | None = None,
         worktree_path: str | None = None,
+        runner_name: str | None = None,
+        agent_role: str | None = None,
+        agent_name: str | None = None,
+        agent_avatar: str | None = None,
+        model: str | None = None,
+        settings: dict[str, Any] | None = None,
+        token_usage: dict[str, Any] | None = None,
         error: str | None = None,
     ) -> None:
         with self._connect() as db:
             db.execute(
                 """
-                insert into runs (id, item_id, identifier, status, branch_name, worktree_path, error)
-                values (?, ?, ?, ?, ?, ?, ?)
+                insert into runs (
+                    id, item_id, identifier, status, branch_name, worktree_path,
+                    runner_name, agent_role, agent_name, agent_avatar, model, settings, token_usage, error
+                )
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 on conflict(id) do update set
                     status = excluded.status,
-                    branch_name = excluded.branch_name,
-                    worktree_path = excluded.worktree_path,
+                    branch_name = coalesce(excluded.branch_name, runs.branch_name),
+                    worktree_path = coalesce(excluded.worktree_path, runs.worktree_path),
+                    runner_name = coalesce(excluded.runner_name, runs.runner_name),
+                    agent_role = coalesce(excluded.agent_role, runs.agent_role),
+                    agent_name = coalesce(excluded.agent_name, runs.agent_name),
+                    agent_avatar = coalesce(excluded.agent_avatar, runs.agent_avatar),
+                    model = coalesce(excluded.model, runs.model),
+                    settings = excluded.settings,
+                    token_usage = excluded.token_usage,
                     error = excluded.error,
                     updated_at = current_timestamp
                 """,
-                (run_id, item_id, identifier, status, branch_name, worktree_path, error),
+                (
+                    run_id,
+                    item_id,
+                    identifier,
+                    status,
+                    branch_name,
+                    worktree_path,
+                    runner_name,
+                    agent_role,
+                    agent_name,
+                    agent_avatar,
+                    model,
+                    json.dumps(settings or {}, sort_keys=True),
+                    json.dumps(token_usage or {}, sort_keys=True),
+                    error,
+                ),
             )
 
     def add_event(self, run_id: str, kind: str, payload: dict[str, Any]) -> None:
@@ -204,11 +284,20 @@ class RunStore:
             for row in rows
         ]
 
-    def add_artifact(self, run_id: str, path: str, *, kind: str = "file") -> None:
+    def add_artifact(
+        self,
+        run_id: str,
+        path: str,
+        *,
+        kind: str = "file",
+        size_bytes: int | None = None,
+        sha256: str | None = None,
+        redaction: str = "local",
+    ) -> None:
         with self._connect() as db:
             db.execute(
-                "insert into artifacts (run_id, path, kind) values (?, ?, ?)",
-                (run_id, path, kind),
+                "insert into artifacts (run_id, path, kind, size_bytes, sha256, redaction) values (?, ?, ?, ?, ?, ?)",
+                (run_id, path, kind, size_bytes, sha256, redaction),
             )
 
     def list_artifacts(self, run_id: str) -> list[StoredArtifact]:
@@ -223,6 +312,9 @@ class RunStore:
                 run_id=str(row["run_id"]),
                 path=str(row["path"]),
                 kind=str(row["kind"]),
+                size_bytes=int(row["size_bytes"]) if row["size_bytes"] is not None else None,
+                sha256=row["sha256"],
+                redaction=str(row["redaction"] or "local"),
                 created_at=str(row["created_at"]),
             )
             for row in rows
@@ -256,6 +348,11 @@ class RunStore:
                 """,
                 (status, item_id, run_id),
             )
+
+    def get_claim(self, item_id: str) -> StoredClaim | None:
+        with self._connect() as db:
+            row = db.execute("select * from claims where item_id = ?", (item_id,)).fetchone()
+        return _claim_from_row(row) if row is not None else None
 
     def release_stale_claims(self, *, max_age_seconds: float) -> list[StoredClaim]:
         age_seconds = max(0, int(max_age_seconds))
@@ -306,6 +403,13 @@ class RunStore:
             status=str(row["status"]),
             branch_name=row["branch_name"],
             worktree_path=row["worktree_path"],
+            runner_name=row["runner_name"],
+            agent_role=row["agent_role"],
+            agent_name=row["agent_name"],
+            agent_avatar=row["agent_avatar"],
+            model=row["model"],
+            settings=_decode_payload(str(row["settings"])),
+            token_usage=_decode_payload(str(row["token_usage"])),
             error=row["error"],
         )
 
@@ -323,6 +427,13 @@ class RunStore:
                 status=str(row["status"]),
                 branch_name=row["branch_name"],
                 worktree_path=row["worktree_path"],
+                runner_name=row["runner_name"],
+                agent_role=row["agent_role"],
+                agent_name=row["agent_name"],
+                agent_avatar=row["agent_avatar"],
+                model=row["model"],
+                settings=_decode_payload(str(row["settings"])),
+                token_usage=_decode_payload(str(row["token_usage"])),
                 error=row["error"],
             )
             for row in rows
@@ -349,6 +460,13 @@ class RunStore:
             status=str(row["status"]),
             branch_name=row["branch_name"],
             worktree_path=row["worktree_path"],
+            runner_name=row["runner_name"],
+            agent_role=row["agent_role"],
+            agent_name=row["agent_name"],
+            agent_avatar=row["agent_avatar"],
+            model=row["model"],
+            settings=_decode_payload(str(row["settings"])),
+            token_usage=_decode_payload(str(row["token_usage"])),
             error=row["error"],
         )
 
@@ -362,6 +480,12 @@ class RunStore:
         parent_identifier: str | None = None,
         parent_run_id: str | None = None,
         created_by_run_id: str | None = None,
+        root_item_id: str | None = None,
+        role: str | None = None,
+        depends_on: tuple[str, ...] = (),
+        generation: int = 0,
+        approval_mode: str | None = None,
+        terminal_outcome: str | None = None,
         settings: dict[str, Any] | None = None,
     ) -> None:
         with self._connect() as db:
@@ -375,9 +499,15 @@ class RunStore:
                     parent_identifier,
                     parent_run_id,
                     created_by_run_id,
+                    root_item_id,
+                    role,
+                    depends_on,
+                    generation,
+                    approval_mode,
+                    terminal_outcome,
                     settings
                 )
-                values (?, ?, ?, ?, ?, ?, ?, ?)
+                values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 on conflict(item_id) do update set
                     source = excluded.source,
                     depth = excluded.depth,
@@ -385,6 +515,12 @@ class RunStore:
                     parent_identifier = excluded.parent_identifier,
                     parent_run_id = excluded.parent_run_id,
                     created_by_run_id = excluded.created_by_run_id,
+                    root_item_id = excluded.root_item_id,
+                    role = excluded.role,
+                    depends_on = excluded.depends_on,
+                    generation = excluded.generation,
+                    approval_mode = excluded.approval_mode,
+                    terminal_outcome = excluded.terminal_outcome,
                     settings = excluded.settings,
                     updated_at = current_timestamp
                 """,
@@ -396,6 +532,12 @@ class RunStore:
                     parent_identifier,
                     parent_run_id,
                     created_by_run_id,
+                    root_item_id,
+                    role,
+                    json.dumps(list(depends_on), sort_keys=True),
+                    max(0, int(generation)),
+                    approval_mode,
+                    terminal_outcome,
                     json.dumps(settings or {}, sort_keys=True),
                 ),
             )
@@ -405,6 +547,31 @@ class RunStore:
             row = db.execute("select * from task_metadata where item_id = ?", (item_id,)).fetchone()
         return _task_metadata_from_row(row) if row is not None else None
 
+    def list_child_task_metadata(self, parent_item_id: str) -> list[TaskMetadata]:
+        with self._connect() as db:
+            rows = db.execute(
+                """
+                select *
+                from task_metadata
+                where parent_item_id = ?
+                order by created_at asc, item_id asc
+                """,
+                (parent_item_id,),
+            ).fetchall()
+        return [_task_metadata_from_row(row) for row in rows]
+
+    def list_parent_item_ids_with_children(self) -> list[str]:
+        with self._connect() as db:
+            rows = db.execute(
+                """
+                select distinct parent_item_id
+                from task_metadata
+                where parent_item_id is not null
+                order by parent_item_id asc
+                """
+            ).fetchall()
+        return [str(row["parent_item_id"]) for row in rows]
+
 
 def _decode_payload(raw: str) -> dict[str, Any]:
     try:
@@ -412,6 +579,12 @@ def _decode_payload(raw: str) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _ensure_column(db: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    columns = {str(row["name"]) for row in db.execute(f"pragma table_info({table})").fetchall()}
+    if column not in columns:
+        db.execute(f"alter table {table} add column {column} {definition}")
 
 
 def _claim_from_row(row: sqlite3.Row) -> StoredClaim:
@@ -433,7 +606,23 @@ def _task_metadata_from_row(row: sqlite3.Row) -> TaskMetadata:
         parent_identifier=row["parent_identifier"],
         parent_run_id=row["parent_run_id"],
         created_by_run_id=row["created_by_run_id"],
+        root_item_id=row["root_item_id"],
+        role=row["role"],
+        depends_on=_decode_string_tuple(str(row["depends_on"])),
+        generation=max(0, int(row["generation"])),
+        approval_mode=row["approval_mode"],
+        terminal_outcome=row["terminal_outcome"],
         settings=_decode_payload(str(row["settings"])),
         created_at=str(row["created_at"]),
         updated_at=str(row["updated_at"]),
     )
+
+
+def _decode_string_tuple(raw: str) -> tuple[str, ...]:
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return ()
+    if not isinstance(payload, list):
+        return ()
+    return tuple(str(item) for item in payload if isinstance(item, str) and item.strip())

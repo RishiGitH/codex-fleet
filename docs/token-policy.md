@@ -30,8 +30,18 @@ Use `--strict` in local validation when a change intentionally tightens token bu
 
 ## Compression strategy
 
-- RTK-style command compression: filter repeated progress lines, keep errors and command metadata, and always save raw output first.
-- Caveman-style doc compression: summarize long prose, plans, or handoffs only. Do not use it for exact code, exact error traces, or security evidence.
-- Repomix-style repo packing: produce targeted file lists, tree summaries, token counts, and explicit exclusions. Do not dump the whole repo by default.
+- Native capture compression: always available, filters repeated output, keeps errors and command metadata, and always saves raw output first.
+- RTK-style command compression: optional external helper for large command output. Use only after raw output is saved.
+- Caveman-style doc compression: optional helper for long prose, plans, or handoffs only. Do not use it for exact code, exact error traces, or security evidence.
+- Repomix-style repo packing: optional inspiration for broad repo maps. Prefer codex-fleet `pack-context --profile minimal` or `--profile task` first.
+- Graphify-style architecture maps: optional for large or unfamiliar repos. Do not use it for routine edits.
 
 RTK, Caveman, and Repomix are optional inspirations or future integrations. codex-fleet must run cleanly without them installed.
+
+## Context pack profiles
+
+- `minimal`: guidance docs, command map, tree, and source/test inventory. Default.
+- `task`: minimal pack plus explicit include globs for the files relevant to a task.
+- `full`: rare architecture/debugging mode. It may include source excerpts, but still excludes generated, private, cache, and heavy skill implementation assets.
+
+Keep large frontend skill assets such as Impeccable opt-in for UI work; do not let them dominate ordinary backend or orchestration context.

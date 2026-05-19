@@ -31,12 +31,19 @@ DEFAULT_CODEX_SETTINGS: dict[str, Any] = {
     "runner_mode": "codex",
     "default_model": "gpt-5.5",
     "reasoning_effort": "low",
-    "approval_policy": "on-request",
+    "approval_policy": "never",
     "sandbox_mode": "workspace-write",
     "max_parallel_agents": 3,
     "max_task_depth": 2,
+    "max_child_tasks_per_run": 8,
+    "max_total_agent_created_tasks_per_parent": 20,
     "job_timeout_seconds": 1200,
-    "agent_task_mode": "agent_task_planner",
+    "automation_mode": "assisted",
+    "agent_task_mode": "review_and_approve",
+    "agent_role": "worker",
+    "skill_policy": "minimal",
+    "max_prompt_protocol_tokens": 800,
+    "max_plane_comment_chars": 4000,
     "subagents": {
         "code_scout": {"model": "gpt-5.4-mini", "reasoning_effort": "medium", "sandbox_mode": "read-only"},
         "implementer": {"model": "gpt-5.5", "reasoning_effort": "low", "sandbox_mode": "workspace-write"},
@@ -269,11 +276,26 @@ def normalize_codex_settings(raw: dict[str, Any] | None) -> dict[str, Any]:
         "approval_policy",
         "sandbox_mode",
         "agent_task_mode",
+        "automation_mode",
+        "agent_role",
+        "skill_policy",
     ):
         value = source.get(key)
         if isinstance(value, str) and value.strip():
             settings[key] = value.strip()
-    for key in ("max_parallel_agents", "max_task_depth", "job_timeout_seconds"):
+    if "automation_mode" not in source and "agent_task_mode" in source:
+        settings["automation_mode"] = _automation_mode_from_agent_task_mode(settings["agent_task_mode"])
+    elif "automation_mode" in source:
+        settings["agent_task_mode"] = _agent_task_mode_from_automation_mode(settings["automation_mode"])
+    for key in (
+        "max_parallel_agents",
+        "max_task_depth",
+        "max_child_tasks_per_run",
+        "max_total_agent_created_tasks_per_parent",
+        "job_timeout_seconds",
+        "max_prompt_protocol_tokens",
+        "max_plane_comment_chars",
+    ):
         value = source.get(key)
         if isinstance(value, int) and value > 0:
             settings[key] = value
@@ -287,9 +309,28 @@ def normalize_codex_settings(raw: dict[str, Any] | None) -> dict[str, Any]:
                 value = agent_settings.get(key)
                 if isinstance(value, str) and value.strip():
                     current[key] = value.strip()
-    if settings["agent_task_mode"] not in {"manual", "review_and_approve", "agent_task_planner"}:
-        settings["agent_task_mode"] = "agent_task_planner"
-    return settings
+    if settings["automation_mode"] not in {"manual", "assisted", "full_agent"}:
+        settings["automation_mode"] = "assisted"
+    settings["agent_task_mode"] = _agent_task_mode_from_automation_mode(str(settings["automation_mode"]))
+    if settings["skill_policy"] not in {"minimal", "auto", "full"}:
+        settings["skill_policy"] = "minimal"
+    return dict(settings)
+
+
+def _automation_mode_from_agent_task_mode(value: str) -> str:
+    return {
+        "manual": "manual",
+        "review_and_approve": "assisted",
+        "agent_task_planner": "full_agent",
+    }.get(value, "assisted")
+
+
+def _agent_task_mode_from_automation_mode(value: str) -> str:
+    return {
+        "manual": "manual",
+        "assisted": "review_and_approve",
+        "full_agent": "agent_task_planner",
+    }.get(value, "review_and_approve")
 
 
 def _project_from_row(row: sqlite3.Row) -> LocalProject:

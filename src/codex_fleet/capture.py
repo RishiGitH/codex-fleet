@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from codex_fleet.budget import estimate_tokens
+from codex_fleet.token_tools import external_compress_output, native_compress_output
 
 
 @dataclass(frozen=True)
@@ -17,9 +18,16 @@ class CaptureResult:
     raw_path: Path
     summary_path: Path
     metadata_path: Path
+    compressed_path: Path | None = None
 
 
-def capture_command(repo: Path, command: tuple[str, ...]) -> CaptureResult:
+def capture_command(
+    repo: Path,
+    command: tuple[str, ...],
+    *,
+    compression_mode: str = "off",
+    rtk_command: str = "rtk",
+) -> CaptureResult:
     if not command:
         raise ValueError("capture requires a command after --")
 
@@ -38,6 +46,12 @@ def capture_command(repo: Path, command: tuple[str, ...]) -> CaptureResult:
     metadata_path = artifact_dir / "metadata.json"
     raw_path.write_text(raw)
     summary_path.write_text(summary)
+    compressed_path = _write_compressed_output(
+        artifact_dir,
+        raw,
+        compression_mode=compression_mode,
+        rtk_command=rtk_command,
+    )
     metadata_path.write_text(
         json.dumps(
             {
@@ -46,8 +60,13 @@ def capture_command(repo: Path, command: tuple[str, ...]) -> CaptureResult:
                 "duration_seconds": round(duration, 3),
                 "raw_path": str(raw_path),
                 "summary_path": str(summary_path),
+                "compressed_path": str(compressed_path) if compressed_path else None,
+                "compression_mode": compression_mode,
                 "raw_bytes": len(raw.encode("utf-8")),
                 "raw_estimated_tokens": estimate_tokens(raw),
+                "compressed_estimated_tokens": estimate_tokens(compressed_path.read_text())
+                if compressed_path
+                else None,
             },
             indent=2,
             sort_keys=True,
@@ -61,6 +80,7 @@ def capture_command(repo: Path, command: tuple[str, ...]) -> CaptureResult:
         raw_path=raw_path,
         summary_path=summary_path,
         metadata_path=metadata_path,
+        compressed_path=compressed_path,
     )
 
 
@@ -110,3 +130,22 @@ def _dedupe_preserve_order(lines: list[str]) -> list[str]:
             result.append(line)
             seen.add(line)
     return result
+
+
+def _write_compressed_output(
+    artifact_dir: Path,
+    raw: str,
+    *,
+    compression_mode: str,
+    rtk_command: str,
+) -> Path | None:
+    if compression_mode == "off":
+        return None
+    compressed: str | None = None
+    if compression_mode == "external":
+        compressed = external_compress_output(raw, rtk_command)
+    if compressed is None:
+        compressed = native_compress_output(raw)
+    path = artifact_dir / "compressed.txt"
+    path.write_text(compressed)
+    return path

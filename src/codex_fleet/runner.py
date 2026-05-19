@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shlex
 import shutil
 import subprocess
@@ -14,7 +15,15 @@ from queue import Empty, Queue
 from typing import Any
 
 from codex_fleet.codex.app_server import AppServerClient, AppServerError
-from codex_fleet.models import ProposedTask, RunResult, WorkItem
+from codex_fleet.models import (
+    NeedsInput,
+    ProposedTask,
+    RunResult,
+    TokenUsage,
+    WorkItem,
+    WorkItemState,
+)
+from codex_fleet.prompt_protocol import build_runner_prompt
 
 
 class Runner(ABC):
@@ -149,7 +158,21 @@ class CodexCliRunner(Runner):
                 artifacts=(output_path,),
                 error=_tail(output) or f"Codex CLI exited with {completed.returncode}",
             )
+        needs_input = parse_needs_input(output)
         proposed_tasks = parse_proposed_tasks(output)
+        token_usage = parse_token_usage(output)
+        if needs_input is not None:
+            return RunResult(
+                success=False,
+                summary=needs_input.question,
+                changed_files=changed_files,
+                test_commands=("reported by Codex CLI",),
+                artifacts=(output_path,),
+                proposed_tasks=proposed_tasks,
+                needs_input=needs_input,
+                token_usage=token_usage,
+                error=needs_input.question,
+            )
         return RunResult(
             success=True,
             summary=_tail(output) or f"Codex CLI completed {item.identifier}.",
@@ -157,6 +180,7 @@ class CodexCliRunner(Runner):
             test_commands=("reported by Codex CLI",),
             artifacts=(output_path,),
             proposed_tasks=proposed_tasks,
+            token_usage=token_usage,
         )
 
 
@@ -214,15 +238,7 @@ def check_codex_cli_preflight(command_parts: list[str]) -> RunnerPreflight:
 
 
 def _prompt_for_item(item: WorkItem) -> str:
-    description = item.description or "No description provided."
-    return (
-        f"Work item {item.identifier}: {item.title}\n\n"
-        f"Description:\n{description}\n\n"
-        "Make the smallest correct change, run relevant tests, and summarize the result.\n\n"
-        "If you discover follow-up work that should become separate tasks, include one fenced block named "
-        "`codex-fleet-proposed-tasks` containing a JSON array of objects with `title` and optional "
-        "`description`. Do not include secrets."
-    )
+    return build_runner_prompt(item)
 
 
 def parse_proposed_tasks(output: str) -> tuple[ProposedTask, ...]:
@@ -239,6 +255,112 @@ def parse_proposed_tasks(output: str) -> tuple[ProposedTask, ...]:
             if task is not None:
                 tasks.append(task)
     return tuple(tasks)
+
+
+def parse_needs_input(output: str) -> NeedsInput | None:
+    for block in _fenced_blocks(output, "codex-fleet-needs-input"):
+        try:
+            raw = loads(block)
+        except ValueError:
+            continue
+        if not isinstance(raw, dict):
+            continue
+        question = raw.get("question")
+        if not isinstance(question, str) or not question.strip():
+            continue
+        needed = raw.get("needed_to_continue")
+        suggested_state = raw.get("suggested_state")
+        return NeedsInput(
+            question=question.strip()[:4000],
+            needed_to_continue=needed if isinstance(needed, bool) else True,
+            suggested_state=(
+                suggested_state.strip()
+                if isinstance(suggested_state, str) and suggested_state.strip()
+                else WorkItemState.NEEDS_INPUT.value
+            ),
+        )
+    return None
+
+
+def parse_token_usage(output: str) -> TokenUsage | None:
+    """Extract token usage from current and older Codex CLI text summaries."""
+    data = _parse_token_usage_json(output) or _parse_token_usage_text(output)
+    if not data:
+        return None
+    input_tokens = _positive_int(data.get("input_tokens") or data.get("prompt_tokens"))
+    output_tokens = _positive_int(data.get("output_tokens") or data.get("completion_tokens"))
+    total_tokens = _positive_int(data.get("total_tokens"))
+    if total_tokens is None and (input_tokens is not None or output_tokens is not None):
+        total_tokens = (input_tokens or 0) + (output_tokens or 0)
+    if input_tokens is None and output_tokens is None and total_tokens is None:
+        return None
+    return TokenUsage(input_tokens=input_tokens, output_tokens=output_tokens, total_tokens=total_tokens)
+
+
+def _parse_token_usage_json(output: str) -> dict[str, int] | None:
+    for block in _fenced_blocks(output, "codex-fleet-token-usage"):
+        try:
+            raw = loads(block)
+        except ValueError:
+            continue
+        if isinstance(raw, dict):
+            return raw
+    for line in output.splitlines():
+        if "token" not in line.lower():
+            continue
+        try:
+            raw = loads(line)
+        except ValueError:
+            continue
+        if isinstance(raw, dict):
+            usage = raw.get("token_usage") or raw.get("usage")
+            if isinstance(usage, dict):
+                return usage
+    return None
+
+
+def _parse_token_usage_text(output: str) -> dict[str, int] | None:
+    usage_lines = [line for line in output.splitlines() if "token" in line.lower()]
+    text = "\n".join(usage_lines[-8:])
+    if not text:
+        return None
+    aliases = {
+        "input_tokens": ("input", "prompt"),
+        "output_tokens": ("output", "completion"),
+        "total_tokens": ("total",),
+    }
+    result: dict[str, int] = {}
+    for key, names in aliases.items():
+        for name in names:
+            match = re.search(rf"\b{name}(?:[_\s-]?tokens?)?\b\s*[:=]\s*([0-9][0-9,]*)", text, flags=re.IGNORECASE)
+            if match:
+                result[key] = int(match.group(1).replace(",", ""))
+                break
+    if not result:
+        match = re.search(
+            r"([0-9][0-9,]*)\s+input\b.*?([0-9][0-9,]*)\s+output\b.*?([0-9][0-9,]*)\s+total\b",
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if match:
+            result = {
+                "input_tokens": int(match.group(1).replace(",", "")),
+                "output_tokens": int(match.group(2).replace(",", "")),
+                "total_tokens": int(match.group(3).replace(",", "")),
+            }
+    return result or None
+
+
+def _positive_int(value: object) -> int | None:
+    if isinstance(value, int) and value >= 0:
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = int(value.replace(",", ""))
+        except ValueError:
+            return None
+        return parsed if parsed >= 0 else None
+    return None
 
 
 def _run_command_streaming(
@@ -261,13 +383,14 @@ def _run_command_streaming(
     )
     assert process.stdin is not None
     assert process.stdout is not None
+    stdout = process.stdout
 
     output_chunks: list[str] = []
     queue: Queue[str | None] = Queue()
 
     def read_output() -> None:
         try:
-            for chunk in iter(process.stdout.readline, ""):
+            for chunk in iter(stdout.readline, ""):
                 queue.put(chunk)
         finally:
             queue.put(None)
@@ -336,12 +459,21 @@ def _proposed_task_from_raw(raw: Any) -> ProposedTask | None:
         return None
     description = raw.get("description")
     labels = raw.get("labels")
+    role = raw.get("role")
+    depends_on = raw.get("depends_on")
+    suggested_state = raw.get("suggested_state")
     clean_labels = ["agent-proposed"]
     if isinstance(labels, list):
         clean_labels.extend(str(label).strip() for label in labels if str(label).strip())
+    clean_depends_on: list[str] = []
+    if isinstance(depends_on, list):
+        clean_depends_on.extend(str(value).strip()[:120] for value in depends_on if str(value).strip())
     return ProposedTask(
         title=title.strip()[:240],
         description=description.strip()[:4000] if isinstance(description, str) and description.strip() else None,
+        role=role.strip()[:80] if isinstance(role, str) and role.strip() else None,
+        depends_on=tuple(dict.fromkeys(clean_depends_on)),
+        suggested_state=suggested_state.strip()[:80] if isinstance(suggested_state, str) and suggested_state.strip() else None,
         labels=tuple(dict.fromkeys(clean_labels)),
     )
 

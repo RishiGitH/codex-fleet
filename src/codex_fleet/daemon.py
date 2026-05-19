@@ -21,8 +21,13 @@ from codex_fleet.project_registry import (
     discover_git_root,
 )
 from codex_fleet.runner import Runner
-from codex_fleet.store import RunStore, StoredClaim
+from codex_fleet.store import RunStore, StoredClaim, TaskMetadata
 from codex_fleet.tracker import Tracker
+from codex_fleet.transitions import (
+    is_active_child_state,
+    is_blocking_child_state,
+    is_successful_child_state,
+)
 
 
 @dataclass(frozen=True)
@@ -89,10 +94,12 @@ class FleetDaemon:
 
     def tick(self) -> OrchestratorResult:
         self.reconcile_stale_claims()
+        self.reconcile_completed_parents()
         return self._run_one()
 
     def tick_many(self) -> list[OrchestratorResult]:
         self.reconcile_stale_claims()
+        self.reconcile_completed_parents()
         limit = max(1, self.config.agent.max_concurrent_agents)
         results: list[OrchestratorResult] = []
         for _ in range(limit):
@@ -107,6 +114,69 @@ class FleetDaemon:
         for claim in stale_claims:
             self._record_stale_claim(claim)
         return len(stale_claims)
+
+    def reconcile_completed_parents(self) -> int:
+        completed = 0
+        for parent_id in self.store.list_parent_item_ids_with_children():
+            child_metadata = self.store.list_child_task_metadata(parent_id)
+            if not child_metadata:
+                continue
+            item_ids = [parent_id, *(metadata.item_id for metadata in child_metadata)]
+            items = {item.id: item for item in self.tracker.fetch_items_by_ids(item_ids)}
+            parent = items.get(parent_id)
+            if parent is None or parent.state.lower() != WorkItemState.PLANNING.value.lower():
+                continue
+            child_items = [items.get(metadata.item_id) for metadata in child_metadata]
+            if any(item is None for item in child_items):
+                continue
+            blocker_items = [item for item in child_items if item is not None and is_blocking_child_state(item.state)]
+            if blocker_items:
+                self._record_parent_blocked(parent, blocker_items, child_metadata)
+                continue
+            if any(item is not None and is_active_child_state(item.state) for item in child_items):
+                continue
+            if not all(item is not None and is_successful_child_state(item.state) for item in child_items):
+                continue
+            self.tracker.update_item_state(parent_id, WorkItemState.HUMAN_REVIEW.value)
+            self.tracker.create_comment(parent_id, _parent_completed_comment(child_metadata))
+            run_id = child_metadata[0].parent_run_id
+            if run_id is not None:
+                self.store.add_event(
+                    run_id,
+                    "parent_children_completed",
+                    {
+                        "parent_item_id": parent_id,
+                        "state": WorkItemState.HUMAN_REVIEW.value,
+                        "child_count": len(child_metadata),
+                    },
+                )
+            completed += 1
+        return completed
+
+    def _record_parent_blocked(
+        self,
+        parent: WorkItem,
+        blocker_items: list[WorkItem],
+        child_metadata: list[TaskMetadata],
+    ) -> None:
+        run_id = child_metadata[0].parent_run_id
+        payload = {
+            "parent_item_id": parent.id,
+            "blockers": [
+                {"item_id": item.id, "identifier": item.identifier, "state": item.state}
+                for item in blocker_items
+            ],
+        }
+        if run_id is not None:
+            existing = [
+                event
+                for event in self.store.list_events(run_id)
+                if event.kind == "parent_blocked" and event.payload == payload
+            ]
+            if existing:
+                return
+            self.store.add_event(run_id, "parent_blocked", payload)
+        self.tracker.create_comment(parent.id, _parent_blocked_comment(blocker_items))
 
     def _run_one(self) -> OrchestratorResult:
         return Orchestrator(
@@ -131,7 +201,7 @@ class FleetDaemon:
 
     def _agent_task_settings_for_item(self, item: WorkItem) -> tuple[str, int]:
         settings = self._settings_for_item(item)
-        return str(settings_value(settings, "agent_task_mode")), int(settings_value(settings, "max_task_depth"))
+        return str(settings_value(settings, "agent_task_mode")), int(str(settings_value(settings, "max_task_depth")))
 
     def _claim_ttl_seconds(self) -> float:
         # A Codex turn may legitimately run much longer than the polling stall
@@ -177,9 +247,31 @@ class FleetDaemon:
 
 _ACTIVE_RUN_STATUSES = {
     RunStatus.QUEUED.value,
+    RunStatus.CLAIM_ACQUIRED.value,
     RunStatus.PREPARING_WORKSPACE.value,
+    RunStatus.WORKSPACE_READY.value,
+    RunStatus.RUNNER_STARTED.value,
+    RunStatus.RUNNER_STREAMING.value,
     RunStatus.RUNNING_CODEX.value,
+    RunStatus.CANCEL_REQUESTED.value,
 }
+
+
+def _parent_completed_comment(child_metadata: list[TaskMetadata]) -> str:
+    child_count = len(child_metadata)
+    return (
+        "codex-fleet moved this parent to Human Review because all "
+        f"{child_count} child task{'s' if child_count != 1 else ''} reached Human Review or Done."
+    )
+
+
+def _parent_blocked_comment(blocker_items: list[WorkItem]) -> str:
+    lines = "\n".join(f"- `{item.identifier}` is `{item.state}`" for item in blocker_items)
+    return (
+        "codex-fleet is keeping this parent in Planning because child work needs attention:\n\n"
+        f"{lines}\n\n"
+        "Resolve the child task, then codex-fleet will reconcile the parent again."
+    )
 
 
 def default_daemon_store(repo: Path) -> Path:

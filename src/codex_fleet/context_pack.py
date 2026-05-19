@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from fnmatch import fnmatch
 from pathlib import Path
+from typing import Literal
 
 from codex_fleet.budget import estimate_tokens_for_bytes
 
@@ -22,6 +24,11 @@ DEFAULT_EXCLUDES = (
     "node_modules",
     "codex_fleet.egg-info",
 )
+DEFAULT_EXCLUDE_GLOBS = (
+    ".agents/skills/impeccable/scripts/**",
+    ".agents/skills/impeccable/reference/**",
+)
+ContextPackProfile = Literal["minimal", "task", "full"]
 
 
 @dataclass(frozen=True)
@@ -30,21 +37,30 @@ class ContextPackResult:
     file_count: int
     estimated_tokens: int
     exclusions: tuple[str, ...]
+    profile: str
 
 
-def write_context_pack(repo: Path, out_dir: Path) -> ContextPackResult:
+def write_context_pack(
+    repo: Path,
+    out_dir: Path,
+    *,
+    profile: ContextPackProfile = "minimal",
+    includes: tuple[str, ...] = (),
+    max_tokens: int | None = None,
+) -> ContextPackResult:
     repo = repo.expanduser().resolve()
     out_dir = out_dir.expanduser()
     if not out_dir.is_absolute():
         out_dir = repo / out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    files = tuple(_iter_files(repo))
+    files = tuple(_iter_files(repo, profile=profile, includes=includes))
     tree_text = _render_tree(repo, files)
     docs_text = _render_docs(repo)
-    sources_text = _render_sources(repo, files)
+    sources_text = _render_sources(repo, files, profile=profile, max_tokens=max_tokens)
     total_bytes = sum(len(text.encode("utf-8")) for text in (tree_text, docs_text, sources_text))
     estimated_tokens = estimate_tokens_for_bytes(total_bytes)
+    exclusions = (*DEFAULT_EXCLUDES, *DEFAULT_EXCLUDE_GLOBS)
 
     (out_dir / "tree.md").write_text(tree_text)
     (out_dir / "docs.md").write_text(docs_text)
@@ -56,7 +72,10 @@ def write_context_pack(repo: Path, out_dir: Path) -> ContextPackResult:
                 "generated_at": datetime.now(UTC).isoformat(),
                 "file_count": len(files),
                 "estimated_tokens": estimated_tokens,
-                "exclusions": list(DEFAULT_EXCLUDES),
+                "profile": profile,
+                "includes": list(includes),
+                "max_tokens": max_tokens,
+                "exclusions": list(exclusions),
             },
             indent=2,
             sort_keys=True,
@@ -68,17 +87,23 @@ def write_context_pack(repo: Path, out_dir: Path) -> ContextPackResult:
         out_dir=out_dir,
         file_count=len(files),
         estimated_tokens=estimated_tokens,
-        exclusions=DEFAULT_EXCLUDES,
+        exclusions=exclusions,
+        profile=profile,
     )
 
 
-def _iter_files(repo: Path) -> list[Path]:
+def _iter_files(repo: Path, *, profile: ContextPackProfile, includes: tuple[str, ...]) -> list[Path]:
     files: list[Path] = []
     for path in sorted(repo.rglob("*")):
+        rel = str(path.relative_to(repo))
         rel_parts = path.relative_to(repo).parts
         if any(part in DEFAULT_EXCLUDES for part in rel_parts):
             continue
+        if any(fnmatch(rel, pattern) for pattern in DEFAULT_EXCLUDE_GLOBS):
+            continue
         if path.is_file():
+            if profile == "task" and includes and not _included_for_task(rel, includes):
+                continue
             files.append(path)
     return files
 
@@ -120,14 +145,38 @@ def _first_heading(path: Path) -> str:
     return "(no heading)"
 
 
-def _render_sources(repo: Path, files: tuple[Path, ...]) -> str:
+def _render_sources(
+    repo: Path,
+    files: tuple[Path, ...],
+    *,
+    profile: ContextPackProfile,
+    max_tokens: int | None,
+) -> str:
     lines = ["# Selected source and test files", ""]
     prefixes = ("src/", "tests/", "scripts/")
     suffixes = (".py", ".js", ".toml", ".yml", ".yaml")
+    running_tokens = 0
     for path in files:
         rel = str(path.relative_to(repo))
         if rel.startswith(prefixes) or rel.endswith(suffixes):
             tokens = estimate_tokens_for_bytes(path.stat().st_size)
+            if max_tokens is not None and running_tokens + tokens > max_tokens:
+                lines.append(f"- {rel} ({tokens} rough tokens, omitted by max token cap)")
+                continue
+            running_tokens += tokens
             lines.append(f"- {rel} ({tokens} rough tokens)")
+            if profile == "full" and path.suffix in {".py", ".toml", ".yml", ".yaml"}:
+                lines.append("")
+                lines.append("```text")
+                lines.append(path.read_text(errors="replace"))
+                lines.append("```")
+                lines.append("")
     lines.append("")
     return "\n".join(lines)
+
+
+def _included_for_task(rel: str, includes: tuple[str, ...]) -> bool:
+    guidance = {"AGENTS.md", "WORKFLOW.md", "README.md", "pyproject.toml", "package.json"}
+    if rel in guidance or rel.startswith("docs/") or rel.startswith(".codex/agents/"):
+        return True
+    return any(fnmatch(rel, pattern) for pattern in includes)

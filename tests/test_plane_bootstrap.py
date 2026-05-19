@@ -95,7 +95,7 @@ def test_ensure_plane_labels_creates_task_source_labels() -> None:
 
     created = ensure_plane_labels(client)
 
-    assert set(created) == {"human-requested", "agent-proposed", "agent-followup"}
+    assert {"human-requested", "agent-proposed", "agent-followup", "agent-lead", "agent-worker", "agent-reviewer", "needs-input"} <= set(created)
     assert ("agent-proposed", "#F59E0B") in client.created_labels
 
 

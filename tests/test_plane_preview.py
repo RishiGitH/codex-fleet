@@ -51,7 +51,7 @@ def test_plane_preview_auto_prepares_missing_build(monkeypatch, tmp_path: Path) 
     assert prepared == build_dir
     assert calls == [
         ("pnpm", "--dir", str(source_dir), "install", "--frozen-lockfile"),
-        ("pnpm", "--dir", str(source_dir), "--filter", "web", "build"),
+        ("pnpm", "--dir", str(source_dir), "--filter", "web...", "build"),
     ]
 
 

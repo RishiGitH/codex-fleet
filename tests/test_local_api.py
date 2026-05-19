@@ -126,7 +126,7 @@ def test_local_api_options_allows_private_network_preflight(tmp_path: Path) -> N
             f"{base_url}/api/folders/pick",
             method="OPTIONS",
             headers={
-                "Origin": "http://127.0.0.1:8080",
+                "Origin": "http://127.0.0.1:17880",
                 "Access-Control-Request-Method": "POST",
                 "Access-Control-Request-Private-Network": "true",
             },
@@ -253,6 +253,7 @@ def test_local_api_extracts_codex_task_settings_from_work_item_description() -> 
         "default_model": "gpt-5.4-mini",
         "reasoning_effort": "high",
         "agent_task_mode": "manual",
+        "automation_mode": "manual",
     }
 
 
@@ -279,8 +280,10 @@ def test_local_api_folder_picker_requires_auth_and_returns_selection(
         assert body["code"] == "auth_missing"
 
         picked = _json_request(f"{base_url}/api/folders/pick", method="POST", token=server.token, payload={})
+        check = _json_request(f"{base_url}/api/folders/check", token=server.token)
 
         assert picked == {"name": "selected", "path": str(selected)}
+        assert check == {"available": True, "ok": True, "picker": "native"}
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -312,7 +315,7 @@ def test_local_api_project_registration_links_plane_project(tmp_path: Path, monk
 
     class FakePlaneClient:
         settings = PlaneSettings(
-            base_url="http://127.0.0.1:8080",
+            base_url="http://127.0.0.1:17880",
             api_key="local-plane-token",
             workspace_slug="codex-local",
             project_id="control-project-id",
@@ -340,7 +343,7 @@ def test_local_api_project_registration_links_plane_project(tmp_path: Path, monk
             repo=tmp_path,
             tracker=TrackerConfig(
                 kind="plane",
-                plane_base_url="http://127.0.0.1:8080",
+                plane_base_url="http://127.0.0.1:17880",
                 plane_api_key="local-plane-token",
                 plane_workspace_slug="codex-local",
                 plane_project_id="control-project-id",
@@ -372,7 +375,7 @@ def test_local_api_project_registration_links_plane_project(tmp_path: Path, monk
         assert writes == [
             {
                 "repo": project_dir.resolve(),
-                "base_url": "http://127.0.0.1:8080",
+                "base_url": "http://127.0.0.1:17880",
                 "workspace_slug": "codex-local",
                 "project_id": "plane-project-id",
                 "api_key_value": "local-plane-token",
@@ -383,7 +386,42 @@ def test_local_api_project_registration_links_plane_project(tmp_path: Path, monk
         thread.join(timeout=5)
 
 
+def test_local_api_project_registration_can_require_plane_mapping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project_dir = tmp_path / "sample"
+    project_dir.mkdir()
+    _init_git_repo(project_dir)
+    monkeypatch.setattr(
+        local_api,
+        "_ensure_plane_project_mapping",
+        lambda _server, project: (project, {"status": "skipped", "reason": "control repo is not Plane-backed"}),
+    )
+    server = create_local_api_server(tmp_path, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        with pytest.raises(HTTPError) as failure:
+            _json_request(
+                f"{base_url}/api/projects",
+                method="POST",
+                token=server.token,
+                payload={"path": str(project_dir), "require_plane_mapping": True},
+            )
+
+        body = json.loads(failure.value.read().decode("utf-8"))
+        assert failure.value.code == 400
+        assert body["code"] == "plane_mapping_failed"
+        assert body["error"] == "control repo is not Plane-backed"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
 def test_local_api_exposes_stored_runs(tmp_path: Path) -> None:
+    artifact_path = tmp_path / ".codex-fleet-fake-run.txt"
+    artifact_path.write_text("artifact body\n")
     store = RunStore(default_store_path(tmp_path))
     store.upsert_run(
         run_id="run-1",
@@ -392,9 +430,16 @@ def test_local_api_exposes_stored_runs(tmp_path: Path) -> None:
         status="human_review",
         branch_name="codex-fleet/CF-1",
         worktree_path="/tmp/worktree",
+        runner_name="CodexCliRunner",
+        agent_role="worker",
+        agent_name="Worker",
+        agent_avatar="W",
+        model="gpt-5.4-mini",
+        settings={"agent_task_mode": "review_and_approve"},
+        token_usage={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
     )
     store.add_event("run-1", "completed", {"state": "Human Review"})
-    store.add_artifact("run-1", "/tmp/worktree/.codex-fleet-fake-run.txt")
+    store.add_artifact("run-1", str(artifact_path), size_bytes=14, sha256="abc123")
     server = create_local_api_server(tmp_path, port=0)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -402,17 +447,211 @@ def test_local_api_exposes_stored_runs(tmp_path: Path) -> None:
     try:
         runs = _json_request(f"{base_url}/api/runs", token=server.token)
         run = _json_request(f"{base_url}/api/runs/run-1", token=server.token)
+        run_events = _json_request(f"{base_url}/api/runs/run-1/events", token=server.token)
         status = _json_request(f"{base_url}/api/work-items/item-1/run-status", token=server.token)
         events = _json_request(f"{base_url}/api/events?limit=1", token=server.token)
+        analytics = _json_request(f"{base_url}/api/projects/current/agent-analytics", token=server.token)
+        status_payload = _json_request(f"{base_url}/api/projects/current/control-plane-status", token=server.token)
+        artifact = _raw_request(f"{base_url}/api/runs/run-1/artifacts/{run['run']['artifacts'][0]['id']}", token=server.token)
 
         assert runs["runs"][0]["id"] == "run-1"
         assert run["run"]["status"] == "human_review"
+        assert run["run"]["runner_name"] == "CodexCliRunner"
+        assert run["run"]["agent_role"] == "worker"
+        assert run["run"]["agent_name"] == "Worker"
+        assert run["run"]["model"] == "gpt-5.4-mini"
+        assert run["run"]["settings"]["agent_task_mode"] == "review_and_approve"
+        assert run["run"]["token_usage"]["total_tokens"] == 15
         assert run["run"]["events"][0]["kind"] == "completed"
         assert run["run"]["events"][0]["run_id"] == "run-1"
         assert run["run"]["artifacts"][0]["path"].endswith(".codex-fleet-fake-run.txt")
+        assert run["run"]["artifacts"][0]["size_bytes"] == 14
+        assert run["run"]["artifacts"][0]["sha256"] == "abc123"
         assert status["run"]["id"] == "run-1"
         assert status["run"]["events"][0]["payload"] == {"state": "Human Review"}
+        assert run_events["events"][0]["kind"] == "completed"
         assert events["events"][0]["run_id"] == "run-1"
+        assert analytics["analytics"]["runs_total"] == 1
+        assert analytics["analytics"]["total_tokens"] == 15
+        assert analytics["analytics"]["by_role"][0]["role"] == "worker"
+        assert status_payload["status"]["api"]["ready"] is True
+        assert artifact == "artifact body\n"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_local_api_can_retry_and_cancel_runs(tmp_path: Path) -> None:
+    _init_git_repo(tmp_path)
+    store = RunStore(default_store_path(tmp_path))
+    store.upsert_run(
+        run_id="run-1",
+        item_id="memory-1",
+        identifier="CF-1",
+        status="failed",
+        branch_name="codex-fleet/CF-1",
+        worktree_path="/tmp/worktree",
+    )
+    assert store.try_claim_item("memory-1", "run-1") is True
+    local_items = LocalWorkItemStore(default_local_work_item_store_path(tmp_path))
+    local_items.update_item_state("memory-1", "Rework")
+    server = create_local_api_server(tmp_path, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        retry = _json_request(
+            f"{base_url}/api/work-items/memory-1/retry",
+            method="POST",
+            token=server.token,
+            payload={},
+        )
+        assert retry["state"] == "Ready"
+        assert retry["previous_run"]["id"] == "run-1"
+
+        result = _json_request(
+            f"{base_url}/api/work-items/memory-1/run",
+            method="POST",
+            token=server.token,
+            payload={"fake": True},
+        )
+        cancel = _json_request(
+            f"{base_url}/api/runs/{result['run']['id']}/cancel",
+            method="POST",
+            token=server.token,
+            payload={},
+        )
+
+        assert cancel["run"]["status"] == "cancelled"
+        assert cancel["state"] == "Cancelled"
+        assert local_items.fetch_items_by_ids(["memory-1"])[0].state == "Cancelled"
+        assert any(event["kind"] == "cancelled" for event in cancel["run"]["events"])
+
+        local_items.update_item_state("memory-1", "Running")
+        item_cancel = _json_request(
+            f"{base_url}/api/work-items/memory-1/cancel",
+            method="POST",
+            token=server.token,
+            payload={},
+        )
+        assert item_cancel["state"] == "Cancelled"
+        assert item_cancel["item"]["state"] == "Cancelled"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_local_api_cancel_active_run_stays_cancel_requested(tmp_path: Path) -> None:
+    _init_git_repo(tmp_path)
+    store = RunStore(default_store_path(tmp_path))
+    store.upsert_run(
+        run_id="active-run",
+        item_id="memory-1",
+        identifier="CF-1",
+        status="running_codex",
+    )
+    assert store.try_claim_item("memory-1", "active-run") is True
+    local_items = LocalWorkItemStore(default_local_work_item_store_path(tmp_path))
+    local_items.update_item_state("memory-1", "Running")
+    server = create_local_api_server(tmp_path, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        cancel = _json_request(
+            f"{base_url}/api/runs/active-run/cancel",
+            method="POST",
+            token=server.token,
+            payload={},
+        )
+
+        assert cancel["run"]["status"] == "cancel_requested"
+        assert cancel["state"] == "Cancelled"
+        assert local_items.fetch_items_by_ids(["memory-1"])[0].state == "Cancelled"
+        assert any(event["kind"] == "cancel_requested" for event in cancel["run"]["events"])
+        assert not any(event["kind"] == "cancelled" for event in cancel["run"]["events"])
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_local_api_exposes_work_item_parent_and_children(tmp_path: Path) -> None:
+    store = RunStore(default_store_path(tmp_path))
+    store.upsert_task_metadata(
+        item_id="child-1",
+        source="agent-followup",
+        depth=1,
+        parent_item_id="parent-1",
+        parent_identifier="CF-1",
+        parent_run_id="run-1",
+        created_by_run_id="run-1",
+        role="worker",
+        depends_on=("dep-1",),
+        settings={"role": "worker"},
+    )
+    server = create_local_api_server(tmp_path, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        children = _json_request(f"{base_url}/api/work-items/parent-1/children", token=server.token)
+        parent = _json_request(f"{base_url}/api/work-items/child-1/parent", token=server.token)
+
+        assert children["children"][0]["item_id"] == "child-1"
+        assert children["children"][0]["role"] == "worker"
+        assert children["children"][0]["depends_on"] == ["dep-1"]
+        assert parent["parent"]["parent_item_id"] == "parent-1"
+        assert parent["parent"]["settings"] == {"role": "worker"}
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_local_api_updates_work_item_settings(tmp_path: Path) -> None:
+    _init_git_repo(tmp_path)
+    server = create_local_api_server(tmp_path, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        result = _json_request(
+            f"{base_url}/api/work-items/memory-1/settings",
+            method="POST",
+            token=server.token,
+            payload={
+                "automation_mode": "full_agent",
+                "agent_role": "planner",
+                "depends_on": ["memory-0"],
+            },
+        )
+
+        assert result["settings"]["automation_mode"] == "full_agent"
+        assert result["settings"]["agent_task_mode"] == "agent_task_planner"
+        assert result["metadata"]["role"] == "planner"
+        assert result["metadata"]["depends_on"] == ["memory-0"]
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_local_api_plan_runs_with_planner_settings(tmp_path: Path) -> None:
+    _init_git_repo(tmp_path)
+    server = create_local_api_server(tmp_path, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        result = _json_request(
+            f"{base_url}/api/work-items/memory-1/plan",
+            method="POST",
+            token=server.token,
+            payload={"fake": True},
+        )
+
+        assert result["dispatched"] is True
+        assert result["run"]["settings"]["automation_mode"] == "full_agent"
+        assert result["run"]["settings"]["agent_task_mode"] == "agent_task_planner"
+        assert result["run"]["settings"]["agent_role"] == "planner"
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -580,7 +819,7 @@ def test_local_api_can_target_registered_project_by_plane_project_id(tmp_path: P
         "repo: .\n"
         "tracker:\n"
         "  kind: plane\n"
-        "  plane_base_url: http://127.0.0.1:8080\n"
+        "  plane_base_url: http://127.0.0.1:17880\n"
         "  plane_api_key: local-key\n"
         "  plane_workspace_slug: codex-local\n"
         "  plane_project_id: control-plane-project\n"
@@ -631,7 +870,7 @@ def test_local_api_can_run_next_ready_item_to_rework(tmp_path: Path) -> None:
         run = _json_request(f"{base_url}/api/runs/{result['run']['id']}", token=server.token)
 
         assert result["dispatched"] is True
-        assert result["run"]["status"] == "failed"
+        assert result["run"]["status"] == "rework"
         assert result["run"]["error"] == "configured failure"
         failed = [event for event in run["run"]["events"] if event["kind"] == "failed"]
         assert failed[-1]["payload"]["state"] == "Rework"
@@ -670,7 +909,7 @@ def test_local_api_creates_plane_work_item_with_human_label(tmp_path: Path, monk
         "repo: .\n"
         "tracker:\n"
         "  kind: plane\n"
-        "  plane_base_url: http://127.0.0.1:8080\n"
+        "  plane_base_url: http://127.0.0.1:17880\n"
         "  plane_api_key: test-key\n"
         "  plane_workspace_slug: codex-fleet\n"
         "  plane_project_id: project-id\n"
@@ -749,6 +988,37 @@ def test_local_api_creates_new_starter_project(tmp_path: Path) -> None:
         thread.join(timeout=5)
 
 
+def test_local_api_create_new_reports_non_empty_target(tmp_path: Path) -> None:
+    parent = tmp_path / "projects"
+    target = parent / "Sample-App"
+    target.mkdir(parents=True)
+    (target / "README.md").write_text("existing\n")
+    server = create_local_api_server(tmp_path, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        with pytest.raises(HTTPError) as failure:
+            _json_request(
+                f"{base_url}/api/projects",
+                method="POST",
+                token=server.token,
+                payload={
+                    "create_new": True,
+                    "location": str(parent),
+                    "name": "Sample App",
+                },
+            )
+
+        body = json.loads(failure.value.read().decode("utf-8"))
+        assert failure.value.code == 400
+        assert "Project folder is not empty" in body["error"]
+        assert str(target) in body["error"]
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
 def test_local_api_plans_and_applies_project_harness(tmp_path: Path) -> None:
     project_dir = tmp_path / "app"
     project_dir.mkdir()
@@ -812,18 +1082,18 @@ def test_onboarding_url_places_local_token_in_fragment(tmp_path: Path) -> None:
 
     url = build_onboarding_url(
         tmp_path,
-        plane_url="http://127.0.0.1:3000/",
+        plane_url="http://127.0.0.1:17300/",
         project_path=project_dir,
-        api_url="http://127.0.0.1:8790",
+        api_url="http://127.0.0.1:18790",
     )
     parsed = urlparse(url)
     fragment = parse_qs(parsed.fragment)
 
     assert parsed.scheme == "http"
-    assert parsed.netloc == "127.0.0.1:3000"
+    assert parsed.netloc == "127.0.0.1:17300"
     assert parsed.path == "/codex-fleet/onboarding"
     assert "token" not in parse_qs(parsed.query)
-    assert fragment["apiUrl"] == ["http://127.0.0.1:8790"]
+    assert fragment["apiUrl"] == ["http://127.0.0.1:18790"]
     assert fragment["path"] == [str(project_dir.resolve())]
     assert fragment["token"][0]
 
@@ -832,8 +1102,8 @@ def test_plane_login_url_uses_nonce_without_long_lived_token(tmp_path: Path) -> 
     token = local_api.load_or_create_local_api_token(tmp_path)
     url = build_plane_login_url(
         tmp_path,
-        api_url="http://127.0.0.1:8790",
-        plane_url="http://127.0.0.1:8080",
+        api_url="http://127.0.0.1:18790",
+        plane_url="http://127.0.0.1:17880",
         redirect_path="codex-fleet/projects/project-id/issues/",
     )
 
@@ -846,11 +1116,11 @@ def test_plane_login_url_uses_nonce_without_long_lived_token(tmp_path: Path) -> 
     assert query["nonce"][0]
     assert "token" not in query
     assert token not in url
-    assert query["planeOrigin"] == ["http://127.0.0.1:8080"]
+    assert query["planeOrigin"] == ["http://127.0.0.1:17880"]
     assert redirect.scheme == "http"
-    assert redirect.netloc == "127.0.0.1:8080"
+    assert redirect.netloc == "127.0.0.1:17880"
     assert redirect.path == "/codex-fleet/projects/project-id/issues/"
-    assert redirect_fragment["apiUrl"] == ["http://127.0.0.1:8790"]
+    assert redirect_fragment["apiUrl"] == ["http://127.0.0.1:18790"]
     assert "token" not in redirect_fragment
 
 
@@ -868,8 +1138,8 @@ def test_plane_login_endpoint_sets_plane_session_cookie(tmp_path: Path, monkeypa
         query = urlencode(
             {
                 "nonce": nonce,
-                "redirect": "http://127.0.0.1:8080/codex-fleet/",
-                "planeOrigin": "http://127.0.0.1:8080",
+                "redirect": "http://127.0.0.1:17880/codex-fleet/",
+                "planeOrigin": "http://127.0.0.1:17880",
             }
         )
         path = (
@@ -884,7 +1154,7 @@ def test_plane_login_endpoint_sets_plane_session_cookie(tmp_path: Path, monkeypa
         parsed_location = urlparse(location)
         fragment = parse_qs(parsed_location.fragment)
         assert parsed_location.scheme == "http"
-        assert parsed_location.netloc == "127.0.0.1:8080"
+        assert parsed_location.netloc == "127.0.0.1:17880"
         assert parsed_location.path == "/codex-fleet/"
         assert fragment["apiUrl"] == [f"http://127.0.0.1:{server.server_port}"]
         assert fragment["code"][0]
@@ -916,8 +1186,8 @@ def test_plane_login_rejects_reused_nonce_and_wrong_redirect_origin(tmp_path: Pa
         query = urlencode(
             {
                 "nonce": nonce,
-                "redirect": "http://127.0.0.1:8080/codex-fleet/",
-                "planeOrigin": "http://127.0.0.1:8080",
+                "redirect": "http://127.0.0.1:17880/codex-fleet/",
+                "planeOrigin": "http://127.0.0.1:17880",
             }
         )
         conn = http.client.HTTPConnection("127.0.0.1", server.server_port)
@@ -933,12 +1203,67 @@ def test_plane_login_rejects_reused_nonce_and_wrong_redirect_origin(tmp_path: Pa
             {
                 "nonce": bad_nonce,
                 "redirect": "http://127.0.0.1:9999/codex-fleet/",
-                "planeOrigin": "http://127.0.0.1:8080",
+                "planeOrigin": "http://127.0.0.1:17880",
             }
         )
         conn = http.client.HTTPConnection("127.0.0.1", server.server_port)
         conn.request("GET", f"/api/plane/login?{bad_query}")
         assert conn.getresponse().status == 400
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_local_api_fleet_logs_reports_unlinked_plane_project(tmp_path: Path) -> None:
+    server = create_local_api_server(tmp_path, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        result = _json_request(
+            f"{base_url}/api/projects/plane-project-1/fleet-logs",
+            token=server.token,
+        )
+
+        logs = result["fleet_logs"]
+        assert logs["linked"] is False
+        assert logs["project"] is None
+        assert logs["runs"] == []
+        assert logs["tasks"] == []
+        assert "not linked" in logs["message"]
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_local_api_fleet_logs_uses_newest_run_for_task_latest_run(tmp_path: Path) -> None:
+    _init_git_repo(tmp_path)
+    store = RunStore(default_store_path(tmp_path))
+    store.upsert_task_metadata(
+        item_id="child-1",
+        source="agent-followup",
+        depth=1,
+        parent_item_id="parent-1",
+        parent_identifier="CF-1",
+        parent_run_id="parent-run",
+        created_by_run_id="parent-run",
+        role="worker",
+    )
+    store.upsert_run(run_id="run-1", item_id="child-1", identifier="CF-2", status="failed")
+    store.upsert_run(run_id="run-2", item_id="child-1", identifier="CF-2", status="human_review")
+    server = create_local_api_server(tmp_path, port=0)
+    project = server.registry.add_project(tmp_path)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        result = _json_request(
+            f"{base_url}/api/projects/{project.id}/fleet-logs",
+            token=server.token,
+        )
+
+        task = result["fleet_logs"]["tasks"][0]
+        assert task["latest_run"]["id"] == "run-2"
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -959,6 +1284,14 @@ def _json_request(
         request.add_header("Content-Type", "application/json")
     with urlopen(request, timeout=5) as response:  # noqa: S310 - loopback test server.
         return json.loads(response.read().decode("utf-8"))
+
+
+def _raw_request(url: str, *, token: str | None = None) -> str:
+    request = Request(url, method="GET")
+    if token:
+        request.add_header("X-Codex-Fleet-Token", token)
+    with urlopen(request, timeout=5) as response:  # noqa: S310 - loopback test server.
+        return response.read().decode("utf-8")
 
 
 def _init_git_repo(path: Path) -> None:

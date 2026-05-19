@@ -29,7 +29,7 @@ def create_plane_preview_server(
     repo: Path,
     *,
     host: str = DEFAULT_LOCAL_API_HOST,
-    port: int = 3000,
+    port: int = 17300,
     unsafe_allow_remote: bool = False,
     auto_prepare: bool = True,
 ) -> PlanePreviewServer:
@@ -62,7 +62,7 @@ def prepare_plane_preview_build(repo: Path) -> Path:
         raise PlanePreviewError(str(exc)) from exc
     _require_pnpm()
     _run_pnpm(source.source_dir, "install", "--frozen-lockfile")
-    _run_pnpm(source.source_dir, "--filter", "web", "build")
+    _run_pnpm(source.source_dir, "--filter", "web...", "build")
     build_dir = default_plane_build_dir(repo)
     if not (build_dir / "index.html").exists():
         raise PlanePreviewError(f"Plane web build completed, but index.html was not found at {build_dir}.")

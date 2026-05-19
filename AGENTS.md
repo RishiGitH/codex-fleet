@@ -17,6 +17,8 @@ This file gives Codex concise project guidance for working in `codex-fleet`.
 - Agent orchestration: `docs/agent-orchestration.md`
 - Harness engine: `docs/harness-engine.md`
 - Token policy: `docs/token-policy.md`
+- Development environment: `docs/dev-environment.md`
+- AI workflow: `docs/ai-workflow.md`
 - Security notes: `docs/security.md`
 - Execution plans: `docs/exec-plans/`
 - Skills: `.agents/skills/`
@@ -57,7 +59,7 @@ Run context budget check:
 python -m codex_fleet budget --repo .
 ```
 
-Use `token_reviewer` when editing docs, skills, prompts, logging, or context packing. Keep raw logs as artifacts and summarize only the context needed by agents.
+Use `change-verification` before reporting code changes complete. Use `token_reviewer` when editing docs, skills, prompts, logging, or context packing. Keep raw logs as artifacts and summarize only the context needed by agents.
 
 Run local smoke flow:
 

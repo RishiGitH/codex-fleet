@@ -9,8 +9,10 @@ from typing import Any
 
 class WorkItemState(StrEnum):
     BACKLOG = "Backlog"
+    PLANNING = "Planning"
     READY = "Ready"
     RUNNING = "Running"
+    NEEDS_INPUT = "Needs Input"
     HUMAN_REVIEW = "Human Review"
     REWORK = "Rework"
     DONE = "Done"
@@ -20,10 +22,21 @@ class WorkItemState(StrEnum):
 
 class RunStatus(StrEnum):
     QUEUED = "queued"
+    CLAIM_ACQUIRED = "claim_acquired"
     PREPARING_WORKSPACE = "preparing_workspace"
+    WORKSPACE_READY = "workspace_ready"
+    RUNNER_STARTED = "runner_started"
+    RUNNER_STREAMING = "runner_streaming"
     RUNNING_CODEX = "running_codex"
+    RUNNER_COMPLETED = "runner_completed"
+    COLLECTING_EVIDENCE = "collecting_evidence"
+    PLANNING = "planning"
+    NEEDS_INPUT = "needs_input"
     HUMAN_REVIEW = "human_review"
     DONE = "done"
+    REWORK = "rework"
+    BLOCKED = "blocked"
+    CANCEL_REQUESTED = "cancel_requested"
     FAILED = "failed"
     STALLED = "stalled"
     CANCELLED = "cancelled"
@@ -58,6 +71,13 @@ class WorkItem:
 
 
 @dataclass(frozen=True)
+class TokenUsage:
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+
+
+@dataclass(frozen=True)
 class RunResult:
     success: bool
     summary: str
@@ -65,13 +85,25 @@ class RunResult:
     test_commands: tuple[str, ...] = ()
     artifacts: tuple[Path, ...] = ()
     proposed_tasks: tuple[ProposedTask, ...] = ()
+    needs_input: NeedsInput | None = None
+    token_usage: TokenUsage | None = None
     error: str | None = None
+
+
+@dataclass(frozen=True)
+class NeedsInput:
+    question: str
+    needed_to_continue: bool = True
+    suggested_state: str = WorkItemState.NEEDS_INPUT.value
 
 
 @dataclass(frozen=True)
 class ProposedTask:
     title: str
     description: str | None = None
+    role: str | None = None
+    depends_on: tuple[str, ...] = ()
+    suggested_state: str | None = None
     labels: tuple[str, ...] = ("agent-proposed",)
 
 
@@ -84,6 +116,13 @@ class RunRecord:
     branch_name: str | None = None
     codex_thread_id: str | None = None
     codex_turn_id: str | None = None
+    runner_name: str | None = None
+    agent_role: str | None = None
+    agent_name: str | None = None
+    agent_avatar: str | None = None
+    model: str | None = None
+    settings: dict[str, Any] = field(default_factory=dict)
+    token_usage: TokenUsage | None = None
     attempts: int = 0
     error: str | None = None
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
