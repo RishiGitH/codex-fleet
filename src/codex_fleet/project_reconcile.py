@@ -208,6 +208,7 @@ def _reconcile_plane_mapping(
         workspace_slug=workspace_slug,
         project_id=plane_project_id,
         api_key_value=api_key,
+        codex_settings=mapped.codex_settings,
     )
     return ProjectReconciliation(
         project=mapped,

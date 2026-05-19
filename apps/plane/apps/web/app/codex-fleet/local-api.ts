@@ -104,12 +104,14 @@ export type CodexFleetRunEvent = {
 
 export type CodexFleetRunArtifact = {
   id: number;
+  run_id?: string;
   path: string;
   kind: string;
   size_bytes?: number | null;
   sha256?: string | null;
   redaction?: string;
   created_at: string;
+  download_path?: string;
 };
 
 export type CodexFleetWorktree = {
@@ -617,6 +619,40 @@ export class CodexFleetLocalApi {
       method: "POST",
       body: { answer, ...projectRefBody(project) },
     });
+  }
+
+  async artifactBlob(
+    runId: string,
+    artifactId: number,
+    project?: CodexFleetProjectRef
+  ): Promise<Blob> {
+    const headers = new Headers();
+    if (this.token) headers.set("X-Codex-Fleet-Token", this.token);
+    let response: Response;
+    try {
+      response = await fetch(`${this.baseUrl}${withProjectRef(`/api/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(String(artifactId))}`, project)}`, {
+        method: "GET",
+        headers,
+      });
+    } catch {
+      throw new CodexFleetLocalApiError(
+        `Cannot reach codex-fleet local API at ${this.baseUrl}. Start codex-fleet from your terminal with make up and use the browser window it opens.`,
+        { code: "api_unreachable" }
+      );
+    }
+    if (!response.ok) {
+      let message = response.statusText;
+      let code = "request_failed";
+      try {
+        const payload = await response.json();
+        message = payload?.error ?? message;
+        code = payload?.code ?? code;
+      } catch {
+        // Non-JSON artifact errors are still surfaced with the HTTP status text.
+      }
+      throw new CodexFleetLocalApiError(message, { code, status: response.status });
+    }
+    return response.blob();
   }
 
   private async request<T>(

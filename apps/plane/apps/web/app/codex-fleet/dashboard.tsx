@@ -1,8 +1,15 @@
 import { useEffect, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 
-import { CodexFleetLocalApi } from "./local-api";
-import type { CodexFleetAgentAnalytics, CodexFleetHarness, CodexFleetProject, CodexFleetRun, CodexFleetWorkItem } from "./local-api";
+import { CodexFleetLocalApi, ensureCodexFleetLocalConnection } from "./local-api";
+import type {
+  CodexFleetAgentAnalytics,
+  CodexFleetHarness,
+  CodexFleetProject,
+  CodexFleetRun,
+  CodexFleetWorkflowMode,
+  CodexFleetWorkItem,
+} from "./local-api";
 
 type BootstrapParams = {
   apiUrl: string;
@@ -11,6 +18,81 @@ type BootstrapParams = {
 
 type ProjectMode = "link" | "create";
 type ProjectType = "blank" | "simple-web" | "node-next" | "python";
+type ReasoningEffort = "low" | "medium" | "high";
+type AgentProfile = {
+  label: string;
+  purpose: string;
+  model: string;
+  reasoning_effort: ReasoningEffort;
+  sandbox_mode: string;
+  enabled: boolean;
+};
+
+const DEFAULT_AGENT_PROFILES: Record<string, AgentProfile> = {
+  planner: {
+    label: "Planner",
+    purpose: "Splits the parent request into useful child tasks.",
+    model: "gpt-5.5",
+    reasoning_effort: "medium",
+    sandbox_mode: "workspace-write",
+    enabled: true,
+  },
+  code_scout: {
+    label: "Code Scout",
+    purpose: "Maps unfamiliar code before implementation when needed.",
+    model: "gpt-5.4-mini",
+    reasoning_effort: "high",
+    sandbox_mode: "workspace-write",
+    enabled: false,
+  },
+  implementer: {
+    label: "Implementer",
+    purpose: "Edits code in an isolated worktree.",
+    model: "gpt-5.5",
+    reasoning_effort: "low",
+    sandbox_mode: "workspace-write",
+    enabled: true,
+  },
+  quality_reviewer: {
+    label: "Quality Reviewer",
+    purpose: "Checks build quality, harness fit, and context efficiency.",
+    model: "gpt-5.4-mini",
+    reasoning_effort: "high",
+    sandbox_mode: "workspace-write",
+    enabled: true,
+  },
+  security_reviewer: {
+    label: "Security Reviewer",
+    purpose: "Runs only for security-sensitive changes.",
+    model: "gpt-5.5",
+    reasoning_effort: "medium",
+    sandbox_mode: "workspace-write",
+    enabled: false,
+  },
+  test_reviewer: {
+    label: "Test Agent",
+    purpose: "Runs the app and records browser proof when available.",
+    model: "gpt-5.4-mini",
+    reasoning_effort: "high",
+    sandbox_mode: "workspace-write",
+    enabled: true,
+  },
+  delivery_manager: {
+    label: "Delivery Manager",
+    purpose: "Prepares PR/local merge delivery and cleanup.",
+    model: "gpt-5.4-mini",
+    reasoning_effort: "medium",
+    sandbox_mode: "workspace-write",
+    enabled: true,
+  },
+};
+
+const WORKFLOW_OPTIONS: { value: CodexFleetWorkflowMode; label: string }[] = [
+  { value: "execute_only", label: "Execute only" },
+  { value: "plan_only", label: "Plan only" },
+  { value: "plan_execute", label: "Plan and execute" },
+  { value: "full_auto", label: "Full auto" },
+];
 
 const readBootstrapParams = (): BootstrapParams => {
   if (typeof window === "undefined") return { apiUrl: "", token: "" };
@@ -46,19 +128,85 @@ export default function CodexFleetDashboard() {
   const [newProjectType, setNewProjectType] = useState<ProjectType>("blank");
   const [showManualProjectPath, setShowManualProjectPath] = useState(false);
   const [applyHarnessOnCreate, setApplyHarnessOnCreate] = useState(true);
+  const [initialGoal, setInitialGoal] = useState("");
+  const [startInitialGoal, setStartInitialGoal] = useState(true);
+  const [workflowMode, setWorkflowMode] = useState<CodexFleetWorkflowMode>("plan_execute");
+  const [defaultModel, setDefaultModel] = useState("gpt-5.5");
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("low");
+  const [approvalPolicy] = useState("never");
+  const [sandboxMode] = useState("workspace-write");
+  const [maxParallelAgents, setMaxParallelAgents] = useState(3);
+  const [maxDepth, setMaxDepth] = useState(2);
+  const [subagentsEnabled, setSubagentsEnabled] = useState(true);
+  const [agentProfiles, setAgentProfiles] = useState<Record<string, AgentProfile>>(DEFAULT_AGENT_PROFILES);
 
   const api = () => new CodexFleetLocalApi({ baseUrl: apiUrl.trim() || undefined, token: token.trim() || null });
   const selectedProjectNumber = selectedProjectId ? Number(selectedProjectId) : undefined;
   const selectedProject = projects.find((project) => project.id === selectedProjectNumber);
+  const fullAutoNeedsSubagents = workflowMode === "full_auto" && !subagentsEnabled;
+  const requiredProjectPathMissing =
+    (newProjectMode === "link" && !newProjectPath.trim()) ||
+    (newProjectMode === "create" && (!newProjectName.trim() || !newProjectParentPath.trim()));
+  const createProjectBlocked = busy || requiredProjectPathMissing || !initialGoal.trim() || fullAutoNeedsSubagents || !token.trim();
 
-  const refresh = async (projectOverride?: number) => {
+  const updateAgentProfile = (role: string, update: Partial<AgentProfile>) => {
+    setAgentProfiles((current) => ({
+      ...current,
+      [role]: { ...current[role], ...update },
+    }));
+  };
+
+  const codexSettingsPayload = () => {
+    const enabledRoles = Object.entries(agentProfiles)
+      .filter(([, profile]) => profile.enabled)
+      .map(([role]) => role);
+    const profileSettings = Object.fromEntries(
+      Object.entries(agentProfiles).map(([role, profile]) => [
+        role,
+        {
+          model: profile.model,
+          reasoning_effort: profile.reasoning_effort,
+          sandbox_mode: profile.sandbox_mode,
+          enabled: profile.enabled,
+        },
+      ])
+    );
+    return {
+      runner_mode: "app-server",
+      default_model: defaultModel,
+      reasoning_effort: reasoningEffort,
+      approval_policy: approvalPolicy,
+      sandbox_mode: sandboxMode,
+      max_parallel_agents: maxParallelAgents,
+      max_depth: maxDepth,
+      workflow_mode: workflowMode,
+      subagents_enabled: subagentsEnabled,
+      enabled_agent_roles: enabledRoles,
+      agent_profiles: profileSettings,
+      subagents: Object.fromEntries(
+        Object.entries(agentProfiles).map(([role, profile]) => [
+          role,
+          {
+            model: profile.model,
+            reasoning_effort: profile.reasoning_effort,
+            sandbox_mode: profile.sandbox_mode,
+          },
+        ])
+      ),
+    };
+  };
+
+  const refresh = async (projectOverride?: number, connectionOverride?: BootstrapParams) => {
     setBusy(true);
     setMessage("Loading codex-fleet state...");
     try {
-      if (token.trim()) window.localStorage.setItem("codexFleetLocalToken", token.trim());
-      if (apiUrl.trim()) window.localStorage.setItem("codexFleetLocalApiUrl", apiUrl.trim());
+      const activeToken = connectionOverride?.token ?? token;
+      const activeApiUrl = connectionOverride?.apiUrl ?? apiUrl;
+      const client = new CodexFleetLocalApi({ baseUrl: activeApiUrl.trim() || undefined, token: activeToken.trim() || null });
+      if (activeToken.trim()) window.localStorage.setItem("codexFleetLocalToken", activeToken.trim());
+      if (activeApiUrl.trim()) window.localStorage.setItem("codexFleetLocalApiUrl", activeApiUrl.trim());
       if (selectedProjectId) window.localStorage.setItem("codexFleetProjectId", selectedProjectId);
-      const projectResult = await api().projects();
+      const projectResult = await client.projects();
       const savedProject = projectResult.projects.find((project) => project.id === selectedProjectNumber);
       const firstRunnableProject = projectResult.projects.find((project) => project.can_run);
       const projectId =
@@ -80,10 +228,10 @@ export default function CodexFleetDashboard() {
         return;
       }
       const [readyResult, runResult, analyticsResult, harnessResult] = await Promise.all([
-        api().readyWorkItems(projectId),
-        api().runs(projectId),
-        projectId ? api().agentAnalytics(projectId).catch(() => null) : Promise.resolve(null),
-        projectId ? api().planHarness(projectId).catch(() => null) : Promise.resolve(null),
+        client.readyWorkItems(projectId),
+        client.runs(projectId),
+        projectId ? client.agentAnalytics(projectId).catch(() => null) : Promise.resolve(null),
+        projectId ? client.planHarness(projectId).catch(() => null) : Promise.resolve(null),
       ]);
       setProjects(projectResult.projects);
       setItems(readyResult.items);
@@ -179,6 +327,18 @@ export default function CodexFleetDashboard() {
     event.preventDefault();
     if (newProjectMode === "link" && !newProjectPath.trim()) return;
     if (newProjectMode === "create" && (!newProjectName.trim() || !newProjectParentPath.trim())) return;
+    if (!initialGoal.trim()) {
+      setMessage("Add an initial goal so Codex Fleet can create the first work item.");
+      return;
+    }
+    if (fullAutoNeedsSubagents) {
+      setMessage("Full auto needs subagents. Enable subagents or choose a lighter automation mode.");
+      return;
+    }
+    if (!token.trim()) {
+      setMessage("Reconnect Codex Fleet before creating a local project.");
+      return;
+    }
     setBusy(true);
     setMessage(newProjectMode === "create" ? "Creating project..." : "Adding project...");
     try {
@@ -187,11 +347,17 @@ export default function CodexFleetDashboard() {
           ? {
               create_new: true,
               location: newProjectParentPath.trim(),
+              folder_slug: newProjectName.trim(),
               project_type: newProjectType,
             }
           : { path: newProjectPath.trim() }),
         name: newProjectName.trim() || undefined,
         apply_harness: applyHarnessOnCreate,
+        initial_goal: initialGoal.trim(),
+        start_initial_goal: startInitialGoal,
+        workflow_mode: workflowMode,
+        require_plane_mapping: true,
+        codex_settings: codexSettingsPayload(),
       });
       setSelectedProjectId(String(result.project.id));
       setProjectHarness((current) => ({ ...current, [result.project.id]: result.harness }));
@@ -199,11 +365,14 @@ export default function CodexFleetDashboard() {
       setNewProjectPath("");
       setNewProjectParentPath("");
       setNewProjectName("");
+      setInitialGoal("");
       await refresh(result.project.id);
       setMessage(
-        result.harness.status === "ready"
-          ? `${result.project.name} is ready. Move a codex-fleet item to Ready and codex-fleet will claim it.`
-          : `${result.project.name} is mapped; harness is ${result.harness.status}.`
+        result.initial_item
+          ? `${result.project.name} is linked. ${result.initial_item.identifier} was created${startInitialGoal ? " in Ready" : ""}.`
+          : result.harness.status === "ready"
+            ? `${result.project.name} is ready. Move a codex-fleet item to Ready and codex-fleet will claim it.`
+            : `${result.project.name} is mapped; harness is ${result.harness.status}.`
       );
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "codex-fleet could not add that project.");
@@ -274,7 +443,16 @@ export default function CodexFleetDashboard() {
   };
 
   useEffect(() => {
-    if (token.trim()) void refresh();
+    void (async () => {
+      const connection = await ensureCodexFleetLocalConnection();
+      setApiUrl(connection.apiUrl);
+      setToken(connection.token);
+      if (connection.status === "connected" && connection.token) {
+        await refresh(undefined, { apiUrl: connection.apiUrl, token: connection.token });
+      } else {
+        setMessage(connection.message ?? "Reconnect Codex Fleet to create local projects.");
+      }
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -386,8 +564,19 @@ export default function CodexFleetDashboard() {
           <Panel title="Projects">
             <form className="grid gap-2" onSubmit={createProject}>
               <p className="text-sm text-slate-300">
-                Link an existing folder or create a starter project. codex-fleet maps it to the board, scans the harness, and watches Ready items.
+                Create or link a repo, configure Codex, and create the first Plane work item in one flow.
               </p>
+              {!token.trim() ? (
+                <div className="grid gap-2 rounded-md border border-amber-300/30 bg-amber-500/10 p-3 text-sm text-amber-50">
+                  <p>Codex Fleet is not connected, so folder picking and project creation are blocked.</p>
+                  <a
+                    className="w-max rounded-md bg-amber-200 px-3 py-2 text-xs font-semibold text-slate-950"
+                    href={new CodexFleetLocalApi({ baseUrl: apiUrl.trim() || undefined, token: null }).connectUrl("codex-fleet/dashboard/")}
+                  >
+                    Reconnect Codex Fleet
+                  </a>
+                </div>
+              ) : null}
               <div className="grid grid-cols-2 gap-2 rounded-md border border-white/10 bg-black/20 p-1">
                 {[
                   ["link", "Link folder"],
@@ -460,6 +649,142 @@ export default function CodexFleetDashboard() {
                 value={newProjectName}
                 onChange={(event) => setNewProjectName(event.target.value)}
               />
+              <textarea
+                className="min-h-24 resize-y rounded-md border border-white/10 bg-black/30 px-3 py-2 text-sm text-white outline-none focus:border-cyan-300"
+                placeholder="Initial goal, for example: Build a one-page landing page with a GitHub CTA and record browser proof."
+                value={initialGoal}
+                onChange={(event) => setInitialGoal(event.target.value)}
+              />
+              <div className="grid gap-2 rounded-md border border-white/10 bg-black/20 p-3">
+                <div className="grid gap-2 md:grid-cols-3">
+                  <label className="grid gap-1 text-xs text-slate-300">
+                    Automation mode
+                    <select
+                      className="h-9 rounded-md border border-white/10 bg-black/30 px-2 text-sm text-white outline-none focus:border-cyan-300"
+                      value={workflowMode}
+                      onChange={(event) => setWorkflowMode(event.target.value as CodexFleetWorkflowMode)}
+                    >
+                      {WORKFLOW_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="grid gap-1 text-xs text-slate-300">
+                    Default model
+                    <input
+                      className="h-9 rounded-md border border-white/10 bg-black/30 px-2 text-sm text-white outline-none focus:border-cyan-300"
+                      value={defaultModel}
+                      onChange={(event) => setDefaultModel(event.target.value)}
+                    />
+                  </label>
+                  <label className="grid gap-1 text-xs text-slate-300">
+                    Reasoning
+                    <select
+                      className="h-9 rounded-md border border-white/10 bg-black/30 px-2 text-sm text-white outline-none focus:border-cyan-300"
+                      value={reasoningEffort}
+                      onChange={(event) => setReasoningEffort(event.target.value as ReasoningEffort)}
+                    >
+                      <option value="low">low</option>
+                      <option value="medium">medium</option>
+                      <option value="high">high</option>
+                    </select>
+                  </label>
+                  <label className="grid gap-1 text-xs text-slate-300">
+                    Max agents
+                    <input
+                      className="h-9 rounded-md border border-white/10 bg-black/30 px-2 text-sm text-white outline-none focus:border-cyan-300"
+                      min={1}
+                      max={12}
+                      type="number"
+                      value={maxParallelAgents}
+                      onChange={(event) => setMaxParallelAgents(Number(event.target.value) || 1)}
+                    />
+                  </label>
+                  <label className="grid gap-1 text-xs text-slate-300">
+                    Max depth
+                    <input
+                      className="h-9 rounded-md border border-white/10 bg-black/30 px-2 text-sm text-white outline-none focus:border-cyan-300"
+                      min={0}
+                      max={5}
+                      type="number"
+                      value={maxDepth}
+                      onChange={(event) => setMaxDepth(Number(event.target.value) || 0)}
+                    />
+                  </label>
+                  <label className="grid gap-1 text-xs text-slate-300">
+                    Sandbox / approval
+                    <span className="rounded-md border border-white/10 bg-black/30 px-2 py-2 text-sm text-slate-200">
+                      {sandboxMode} / {approvalPolicy}
+                    </span>
+                  </label>
+                </div>
+                <label className="flex items-start gap-2 rounded-md border border-white/10 bg-black/20 p-3 text-xs text-slate-300">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={startInitialGoal}
+                    onChange={(event) => setStartInitialGoal(event.target.checked)}
+                  />
+                  <span>Create the first work item in Ready so Codex Fleet can start automatically.</span>
+                </label>
+                <label className="flex items-start gap-2 rounded-md border border-white/10 bg-black/20 p-3 text-xs text-slate-300">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    checked={subagentsEnabled}
+                    onChange={(event) => setSubagentsEnabled(event.target.checked)}
+                  />
+                  <span>
+                    Enable Codex subagents
+                    <span className="block text-slate-500">Required for Full auto; Codex Fleet still runs only the roles needed for the task.</span>
+                  </span>
+                </label>
+                {fullAutoNeedsSubagents ? (
+                  <p className="rounded-md border border-amber-300/30 bg-amber-500/10 p-3 text-xs text-amber-50">
+                    Full auto needs subagents so Codex Fleet can plan, implement, test, review, and deliver safely.
+                  </p>
+                ) : null}
+                {subagentsEnabled ? (
+                  <div className="grid gap-2">
+                    {Object.entries(agentProfiles).map(([role, profile]) => {
+                      const roleLocked = role === "planner" || role === "implementer" || role === "delivery_manager";
+                      return (
+                        <div key={role} className="grid gap-2 rounded-md border border-white/10 bg-black/20 p-3 md:grid-cols-[1fr_9rem_8rem]">
+                          <label className="flex items-start gap-2 text-sm text-white">
+                            <input
+                              type="checkbox"
+                              className="mt-1"
+                              checked={profile.enabled}
+                              disabled={roleLocked}
+                              onChange={(event) => updateAgentProfile(role, { enabled: event.target.checked })}
+                            />
+                            <span>
+                              <span className="font-semibold">{profile.label}</span>
+                              <span className="block text-xs text-slate-500">{profile.purpose}</span>
+                            </span>
+                          </label>
+                          <input
+                            className="h-9 rounded-md border border-white/10 bg-black/30 px-2 text-sm text-white outline-none focus:border-cyan-300"
+                            value={profile.model}
+                            onChange={(event) => updateAgentProfile(role, { model: event.target.value })}
+                          />
+                          <select
+                            className="h-9 rounded-md border border-white/10 bg-black/30 px-2 text-sm text-white outline-none focus:border-cyan-300"
+                            value={profile.reasoning_effort}
+                            onChange={(event) => updateAgentProfile(role, { reasoning_effort: event.target.value as ReasoningEffort })}
+                          >
+                            <option value="low">low</option>
+                            <option value="medium">medium</option>
+                            <option value="high">high</option>
+                          </select>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : null}
+              </div>
               <label className="flex items-start gap-2 rounded-md border border-white/10 bg-black/20 p-3 text-xs text-slate-300">
                 <input
                   type="checkbox"
@@ -475,11 +800,7 @@ export default function CodexFleetDashboard() {
               <button
                 type="submit"
                 className="h-9 rounded-md border border-white/10 px-3 text-xs font-semibold text-white disabled:opacity-50"
-                disabled={
-                  busy ||
-                  (newProjectMode === "link" && !newProjectPath.trim()) ||
-                  (newProjectMode === "create" && (!newProjectName.trim() || !newProjectParentPath.trim()))
-                }
+                disabled={createProjectBlocked}
               >
                 {newProjectMode === "create" ? "Create Project" : "Add Project"}
               </button>

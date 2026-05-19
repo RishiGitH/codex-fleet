@@ -31,6 +31,9 @@ def test_codex_app_server_runner_with_fake_server(tmp_path: Path) -> None:
     assert any("model=gpt-5.5" in message.content for message in result.messages)
     assert any("reasoning=low" in message.content for message in result.messages)
     assert any("Agent role: implementer" in message.content for message in result.messages)
+    assert result.proof_kind == "transcript_only"
+    assert result.test_proof_status == "transcript_only"
+    assert any(path.name == "proof-summary.txt" for path in result.artifacts)
 
 
 def test_codex_app_server_prompt_strips_plane_description_html(tmp_path: Path) -> None:
@@ -121,6 +124,29 @@ def test_app_server_protocol_noise_is_not_chat(tmp_path: Path) -> None:
 
     assert [message.content for message in messages if message.kind == "chat_assistant"] == ["Readable assistant output."]
     assert all(message.content not in {"userMessage", "thread/status/changed"} for message in messages)
+
+
+def test_app_server_nested_protocol_labels_are_not_transcript_content(tmp_path: Path) -> None:
+    from codex_fleet.runner import _app_server_messages
+
+    item = WorkItem(id="1", identifier="CF-1", title="Plan", description="Plan work", state="Ready")
+    messages = _app_server_messages(
+        item=item,
+        role="test_reviewer",
+        prompt="Work item CF-1\n\nAgent role: test_reviewer",
+        notifications=(
+            {"method": "item/agentMessage/delta", "params": {"type": "agentMessage", "delta": {"type": "text", "text": "I opened the preview."}}},
+            {"method": "item/agentMessage/delta", "params": {"type": "agentMessage", "delta": {"type": "reasoning", "text": "reasoning"}}},
+            {"method": "item/agentMessage/delta", "params": {"type": "agentMessage", "delta": " Screenshot passed."}},
+            {"method": "item/completed", "params": {"type": "agentMessage"}},
+        ),
+        output_path=tmp_path / "transcript.txt",
+    )
+
+    assistant = [message.content for message in messages if message.kind == "chat_assistant"]
+    assert assistant == ["I opened the preview. Screenshot passed."]
+    assert all("agentMessage" not in message.content for message in messages)
+    assert all(message.content != "reasoning" for message in messages)
 
 
 def test_app_server_assistant_message_keeps_full_content_for_planner_parsing(tmp_path: Path) -> None:

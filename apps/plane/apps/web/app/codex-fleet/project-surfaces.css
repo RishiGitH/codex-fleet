@@ -248,6 +248,41 @@
   line-height: 1.5;
 }
 
+.cf-proof {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.9fr) minmax(360px, 1.1fr);
+  gap: 16px;
+  border: 1px solid color-mix(in oklch, var(--state-tone), var(--cf-border) 46%);
+  border-radius: 8px;
+  background: color-mix(in oklch, var(--state-tone), var(--cf-panel) 94%);
+  padding: 16px;
+}
+
+.cf-proof-main {
+  min-width: 0;
+}
+
+.cf-proof-title {
+  margin: 8px 0 0;
+  color: var(--cf-text);
+  font-size: 20px;
+  font-weight: 760;
+  letter-spacing: 0;
+}
+
+.cf-proof-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.cf-proof-details {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
 .cf-two-column {
   display: grid;
   grid-template-columns: minmax(0, 1.1fr) minmax(360px, 0.9fr);
@@ -610,6 +645,15 @@
     grid-template-columns: 1fr;
   }
 
+  .cf-proof,
+  .cf-proof-details {
+    grid-template-columns: 1fr;
+  }
+
+  .cf-proof-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .cf-diagnostics {
     justify-self: start;
   }
@@ -625,6 +669,10 @@
   }
 
   .cf-summary-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .cf-proof-grid {
     grid-template-columns: 1fr;
   }
 

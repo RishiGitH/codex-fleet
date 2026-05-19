@@ -70,7 +70,11 @@ from codex_fleet.plane_preview import (
 from codex_fleet.plane_views import PlaneViewBootstrapError, ensure_local_plane_project_views
 from codex_fleet.pr_flow import PrRequest, create_draft_pr
 from codex_fleet.project_reconcile import ProjectReconciliation, reconcile_registered_projects
-from codex_fleet.project_registry import ProjectRegistry, default_project_registry_path
+from codex_fleet.project_registry import (
+    ProjectRegistry,
+    default_project_registry_path,
+    discover_git_root,
+)
 from codex_fleet.runner import FakeRunner
 from codex_fleet.store import RunStore
 from codex_fleet.tracker import MemoryTracker
@@ -206,6 +210,53 @@ def project_list(repo: Path) -> None:
             project.runner_mode,
         )
     console.print(table)
+
+
+@project_group.command("prune-stale")
+@click.option("--repo", type=click.Path(path_type=Path), default=Path.cwd(), help="codex-fleet runtime root.")
+@click.option("--apply", "apply_changes", is_flag=True, help="Remove stale registrations. Without this, only prints what would change.")
+def project_prune_stale(repo: Path, apply_changes: bool) -> None:
+    """Remove stale local project registrations from codex-fleet runtime state."""
+    registry = ProjectRegistry(default_project_registry_path(repo))
+    projects = registry.list_projects()
+    stale: list[tuple[int, str, str]] = []
+    seen_plane: dict[tuple[str, str], int] = {}
+    for project in sorted(projects, key=lambda item: item.id, reverse=True):
+        reason: str | None = None
+        if not project.repo_path.exists():
+            reason = f"folder missing: {project.repo_path}"
+        elif discover_git_root(project.repo_path) is None:
+            reason = f"not a git repository: {project.repo_path}"
+        if reason is None and project.plane_workspace_slug and project.plane_project_id:
+            plane_key = (project.plane_workspace_slug, project.plane_project_id)
+            kept_id = seen_plane.get(plane_key)
+            if kept_id is None:
+                seen_plane[plane_key] = project.id
+            else:
+                reason = f"duplicate Plane project mapping; keeping newer registration {kept_id}"
+        if reason is not None:
+            stale.append((project.id, project.name, reason))
+
+    if not stale:
+        console.print("No stale project registrations found.")
+        return
+
+    table = Table(title="stale codex-fleet project registrations")
+    table.add_column("id", justify="right")
+    table.add_column("name")
+    table.add_column("reason")
+    for project_id, name, reason in sorted(stale):
+        table.add_row(str(project_id), name, reason)
+    console.print(table)
+    if not apply_changes:
+        console.print("Dry run only. Re-run with `--apply` to remove these local registry rows.")
+        return
+
+    removed = 0
+    for project_id, _name, _reason in stale:
+        if registry.delete_project(project_id):
+            removed += 1
+    console.print(f"Removed {removed} stale local project registration(s).")
 
 
 @main.command("api")
@@ -1059,6 +1110,10 @@ def _print_project_reconciliation_summary(results: list[ProjectReconciliation]) 
         "Projects restored: "
         f"{ready} ready, {relinked} relinked, {created} recreated, {needs_attention} need attention"
     )
+    if needs_attention:
+        console.print(
+            "Tip: run `codex-fleet project prune-stale --repo .` to preview cleanup of missing, non-git, or duplicate local project registrations."
+        )
 
 
 def _is_loopback_url(url: str) -> bool:
@@ -1103,7 +1158,12 @@ def _daemon_tick_logger(tick_number: int, tick_results: list[ProjectDaemonTick])
         ready_count = getattr(project_tick, "ready_count", None)
         error = getattr(project_tick, "error", None)
         if error is not None:
-            console.print(f"[red]  {repo}: error: {getattr(error, 'message', error)}[/red]")
+            message = str(getattr(error, "message", error))
+            if _is_stale_project_daemon_error(message):
+                console.print(f"[yellow]  {repo}: skipped stale project: {message}[/yellow]")
+                quiet_messages += 1
+            else:
+                console.print(f"[red]  {repo}: error: {message}[/red]")
             continue
         visible_count = getattr(project_tick, "visible_count", None)
         if ready_count is None:
@@ -1131,6 +1191,16 @@ def _daemon_tick_logger(tick_number: int, tick_results: list[ProjectDaemonTick])
         console.print("  no registered project work checked")
     if dispatched == 0:
         console.print("[dim]  waiting: move a work item to Ready in a linked project[/dim]")
+
+
+def _is_stale_project_daemon_error(message: str) -> bool:
+    stale_markers = (
+        "Project folder is missing.",
+        "Project folder is not a git repository.",
+        "Plane project is already mapped to another local project.",
+        "Registered project is not a git repository.",
+    )
+    return any(marker in message for marker in stale_markers)
 
 
 @main.command("internal-smoke-ui", hidden=True)

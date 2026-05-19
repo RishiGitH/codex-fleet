@@ -101,6 +101,24 @@ type ProjectDashboardView = {
   artifactCount: number;
 };
 
+type ProofPackView = {
+  status: string;
+  previewUrl: string;
+  videoUrl: string;
+  videoPath: string;
+  screenshots: string[];
+  buildStatus: string;
+  testStatus: string;
+  changedFiles: string[];
+  branch: string;
+  worktree: string;
+  primaryTask: string;
+  primaryRole: string;
+  proofKind: string;
+  proofWarning: string;
+  proofLogPaths: string[];
+};
+
 type TaskGraphNodeView = {
   id: string;
   key: string;
@@ -267,13 +285,15 @@ export function FleetLogsSurface({ projectId }: SurfaceProps) {
   const runs = data.runs.map(toRunRow);
   const attention = runs.filter((run) => ["needs_input", "blocked", "rework", "failed", "stalled"].includes(run.status));
   const artifactGroups = toArtifactGroups(data.runs);
+  const proofPack = toProofPackView(data.dashboard);
 
   return (
     <SurfaceShell icon={<Activity className="size-4" />} title="Fleet Logs" state={state} onRefresh={reload}>
       {data.unconfigured ? <ConfigureCodexPanel projectId={projectId} state={state} onConfigured={reload} /> : null}
       {data.unconfigured ? null : (
         <div className="grid gap-5">
-          <CommandCenter dashboard={dashboard} />
+          <CommandCenter dashboard={dashboard} proof={proofPack} />
+          <ProofPackCard proof={proofPack} />
           <AgentRunBoard runs={data.runs} onOpenChat={setSelectedRun} />
           <div className="grid gap-5">
             <TaskGraph nodes={nodes} />
@@ -283,7 +303,7 @@ export function FleetLogsSurface({ projectId }: SurfaceProps) {
             <NeedsAttention runs={attention} />
             <RecentRuns runs={runs.slice(0, 6)} />
           </div>
-          <RecentArtifacts groups={artifactGroups.slice(0, 4)} runsExist={data.runs.length > 0} />
+          <RecentArtifacts projectId={projectId} groups={artifactGroups.slice(0, 4)} runsExist={data.runs.length > 0} />
         </div>
       )}
       {selectedRun ? <RunDetailDrawer projectId={projectId} run={selectedRun} onClose={() => setSelectedRun(null)} /> : null}
@@ -360,7 +380,7 @@ export function ArtifactsSurface({ projectId }: SurfaceProps) {
             />
           ) : (
             <div className="grid gap-3">
-              {groups.map((group) => <ArtifactGroup key={group.run.id} group={group} />)}
+              {groups.map((group) => <ArtifactGroup key={group.run.id} projectId={projectId} group={group} />)}
             </div>
           )}
         </Panel>
@@ -797,7 +817,7 @@ function IconButton({ label, disabled, onClick, children }: { label: string; dis
   );
 }
 
-function CommandCenter({ dashboard }: { dashboard: ProjectDashboardView }) {
+function CommandCenter({ dashboard, proof }: { dashboard: ProjectDashboardView; proof: ProofPackView }) {
   const hasBlocker = dashboard.blocker !== "No current blocker";
   const stateTone = hasBlocker ? "bad" : dashboard.latestRunState === "No runs yet" ? "warn" : ["Done", "Completed", "Human Review"].includes(dashboard.latestRunState) ? "good" : "info";
   return (
@@ -820,7 +840,7 @@ function CommandCenter({ dashboard }: { dashboard: ProjectDashboardView }) {
             <span className="cf-label">{hasBlocker ? "Needs attention" : "Current state"}</span>
           </div>
           <h3 className="cf-state-title">{hasBlocker ? "Blocked" : dashboard.latestRunState}</h3>
-          <p className="cf-next-action">{hasBlocker ? nextActionForBlocker(dashboard.blocker) : "Move a configured work item to Ready to start or continue agent work."}</p>
+          <p className="cf-next-action">{hasBlocker ? nextActionForBlocker(dashboard.blocker) : nextActionForState(dashboard.latestRunState, proof)}</p>
         </div>
         <div className="cf-summary-grid">
           <SummaryItem label="Agents" value={String(dashboard.activeAgents)} />
@@ -829,6 +849,51 @@ function CommandCenter({ dashboard }: { dashboard: ProjectDashboardView }) {
           <SummaryItem label="Tokens" value={dashboard.tokenUsage} />
         </div>
         {hasBlocker ? <p className="mt-3 text-sm leading-6">{dashboard.blocker}</p> : null}
+      </div>
+    </section>
+  );
+}
+
+function ProofPackCard({ proof }: { proof: ProofPackView }) {
+  const hasPreview = proof.previewUrl !== "Unavailable";
+  const hasVideo = proof.videoUrl !== "Unavailable" || proof.videoPath !== "Unavailable";
+  const hasLogs = proof.proofLogPaths.length > 0;
+  const statusTone = proof.status === "passed" ? "good" : proof.status === "failed" ? "bad" : proof.status === "running" ? "info" : "warn";
+  return (
+    <section className={`cf-proof cf-state-${statusTone}`}>
+      <div className="cf-proof-main">
+        <div className="cf-inline">
+          <CheckCircle2 className="size-4" />
+          <span className="cf-label">Demo proof pack</span>
+        </div>
+        <h3 className="cf-proof-title">{statusLabel(proof.status)}</h3>
+        <p className="cf-next-action">
+          {hasPreview || hasVideo
+            ? "Preview, screenshots, video, and delivery context are ready for review."
+            : hasLogs
+              ? "CLI proof logs are attached for this non-browser run."
+              : "Proof summary is attached; no runnable browser or CLI target was detected."}
+        </p>
+        {proof.proofWarning !== "Unavailable" ? <p className="mt-2 text-sm text-amber-200">{proof.proofWarning}</p> : null}
+        <div className="mt-3 flex flex-wrap gap-2">
+          {hasPreview ? <a className="cf-button" href={proof.previewUrl} target="_blank" rel="noreferrer">Open Preview</a> : null}
+          {proof.videoUrl !== "Unavailable" ? <a className="cf-button" href={proof.videoUrl} target="_blank" rel="noreferrer">Play Video</a> : null}
+          {proof.videoUrl === "Unavailable" && proof.videoPath !== "Unavailable" ? <CopyableCode label="Video path" value={proof.videoPath} /> : null}
+        </div>
+      </div>
+      <div className="cf-proof-grid">
+        <SummaryItem label="Task" value={proof.primaryTask} />
+        <SummaryItem label="Agent" value={agentLabel(proof.primaryRole)} />
+        <SummaryItem label="Build" value={proof.buildStatus} />
+        <SummaryItem label="Test proof" value={proof.testStatus} />
+        <SummaryItem label="Proof kind" value={proof.proofKind} />
+        <SummaryItem label="Screenshots" value={String(proof.screenshots.length)} />
+        <SummaryItem label="Changed files" value={String(proof.changedFiles.length)} />
+      </div>
+      <div className="cf-proof-details">
+        <CopyableCode label="Branch" value={proof.branch} />
+        <CopyableCode label="Worktree" value={proof.worktree} />
+        {proof.proofLogPaths.map((path) => <CopyableCode key={path} label="Proof log" value={path} />)}
       </div>
     </section>
   );
@@ -985,7 +1050,7 @@ function RecentRuns({ runs }: { runs: RunRowView[] }) {
   );
 }
 
-function RecentArtifacts({ groups, runsExist }: { groups: ArtifactGroupView[]; runsExist: boolean }) {
+function RecentArtifacts({ projectId, groups, runsExist }: { projectId: string; groups: ArtifactGroupView[]; runsExist: boolean }) {
   return (
     <Panel title="Recent artifacts" action={<span className="text-xs text-custom-text-400">{groups.length} runs</span>}>
       {groups.length === 0 ? (
@@ -996,7 +1061,7 @@ function RecentArtifacts({ groups, runsExist }: { groups: ArtifactGroupView[]; r
         />
       ) : (
         <div className="grid gap-3 md:grid-cols-2">
-          {groups.map((group) => <ArtifactGroup key={group.run.id} group={group} compact />)}
+          {groups.map((group) => <ArtifactGroup key={group.run.id} projectId={projectId} group={group} compact />)}
         </div>
       )}
     </Panel>
@@ -1204,7 +1269,7 @@ function RunDetailDrawer({ projectId, run, onClose }: { projectId: string; run: 
           {tab === "chat" ? <ChatTranscript messages={messages.map(toTranscriptMessage)} /> : null}
           {tab === "timeline" ? <AgentActivity events={records(run.events)} runs={[]} /> : null}
           {tab === "files" ? <RunFiles run={row} raw={run} /> : null}
-          {tab === "artifacts" ? <RunArtifacts run={run} /> : null}
+          {tab === "artifacts" ? <RunArtifacts projectId={projectId} run={run} /> : null}
           {tab === "settings" ? <RunSettings run={run} /> : null}
           {tab === "raw" ? <RawRun run={run} /> : null}
         </div>
@@ -1262,10 +1327,10 @@ function RunFiles({ run, raw }: { run: RunRowView; raw: CodexFleetRun }) {
   );
 }
 
-function RunArtifacts({ run }: { run: CodexFleetRun }) {
+function RunArtifacts({ projectId, run }: { projectId: string; run: CodexFleetRun }) {
   const artifacts = run.artifacts || [];
   if (!artifacts.length) return <EmptyState icon={<Archive className="size-5" />} title="No artifacts recorded" body="Transcripts, summaries, logs, screenshots, and reports will appear here when attached by the runner." />;
-  return <div className="grid gap-2">{artifacts.map((artifact) => <ArtifactRow key={artifact.id} artifact={artifact} />)}</div>;
+  return <div className="grid gap-2">{artifacts.map((artifact) => <ArtifactRow key={artifact.id} projectId={projectId} artifact={artifact} />)}</div>;
 }
 
 function RunSettings({ run }: { run: CodexFleetRun }) {
@@ -1295,7 +1360,7 @@ function RunSettings({ run }: { run: CodexFleetRun }) {
   );
 }
 
-function ArtifactGroup({ group, compact = false }: { group: ArtifactGroupView; compact?: boolean }) {
+function ArtifactGroup({ projectId, group, compact = false }: { projectId: string; group: ArtifactGroupView; compact?: boolean }) {
   return (
     <div className="rounded-md border border-custom-border-200 bg-custom-background-100 p-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1307,7 +1372,7 @@ function ArtifactGroup({ group, compact = false }: { group: ArtifactGroupView; c
         <span className="text-xs text-custom-text-400">{group.artifacts.length} artifacts / {group.changedFiles.length} files</span>
       </div>
       <div className={`mt-3 grid gap-2 ${compact ? "" : "md:grid-cols-2"}`}>
-        {group.artifacts.map((artifact) => <ArtifactRow key={artifact.id} artifact={artifact} />)}
+        {group.artifacts.map((artifact) => <ArtifactRow key={artifact.id} projectId={projectId} artifact={artifact} />)}
         {group.changedFiles.slice(0, compact ? 3 : 20).map((file) => (
           <div key={file} className="break-all rounded-md border border-custom-border-200 px-3 py-2 text-xs text-custom-text-300">
             <span className="font-medium text-custom-text-100">changed file</span> {file}
@@ -1318,16 +1383,57 @@ function ArtifactGroup({ group, compact = false }: { group: ArtifactGroupView; c
   );
 }
 
-function ArtifactRow({ artifact }: { artifact: CodexFleetRunArtifact }) {
+function ArtifactRow({ projectId, artifact }: { projectId: string; artifact: CodexFleetRunArtifact }) {
   return (
     <div className="rounded-md border border-custom-border-200 bg-custom-background-90 px-3 py-2">
-      <div className="flex flex-wrap items-center gap-2">
-        <Archive className="size-3.5 text-custom-text-400" />
-        <span className="text-xs font-semibold text-custom-text-100">{artifactKindLabel(artifact.kind)}</span>
-        <span className="text-xs text-custom-text-400">{formatBytes(artifact.size_bytes)}</span>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <Archive className="size-3.5 text-custom-text-400" />
+          <span className="text-xs font-semibold text-custom-text-100">{artifactKindLabel(artifact.kind)}</span>
+          <span className="text-xs text-custom-text-400">{formatBytes(artifact.size_bytes)}</span>
+        </div>
+        <ArtifactOpenButton projectId={projectId} artifact={artifact} />
       </div>
       <p className="mt-1 break-all text-xs text-custom-text-300">{artifact.path}</p>
       {artifact.sha256 ? <p className="mt-1 break-all text-[11px] text-custom-text-400">sha256 {artifact.sha256}</p> : null}
+    </div>
+  );
+}
+
+function ArtifactOpenButton({ projectId, artifact }: { projectId: string; artifact: CodexFleetRunArtifact }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const runId = artifact.run_id;
+  const openArtifact = async () => {
+    if (!runId) {
+      setError("Missing run id");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const local = await ensureCodexFleetLocalConnection();
+      if (!local.token) {
+        reconnectCurrentCodexSurface(local.apiUrl);
+        return;
+      }
+      const api = new CodexFleetLocalApi({ baseUrl: local.apiUrl, token: local.token });
+      const blob = await api.artifactBlob(runId, artifact.id, { plane_project_id: projectId });
+      const url = URL.createObjectURL(blob);
+      window.open(url, "_blank", "noopener,noreferrer");
+      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (caught) {
+      setError(friendlyError(caught, "Could not open artifact."));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="flex items-center gap-2">
+      <button type="button" className="cf-button-secondary" disabled={busy || !runId} onClick={openArtifact}>
+        {busy ? "Opening..." : artifact.kind.includes("video") ? "Play" : "Open"}
+      </button>
+      {error ? <span className="text-[11px] text-red-300">{error}</span> : null}
     </div>
   );
 }
@@ -1549,6 +1655,16 @@ function nextActionForBlocker(blocker: string): string {
   return "Open the related work item, resolve the blocker, then move it back to Ready.";
 }
 
+function nextActionForState(state: string, proof: ProofPackView): string {
+  if (state === "Done" || state === "Completed") {
+    return proof.status === "passed" ? "Review the proof pack, then complete the delivery task when you are satisfied." : "Review the completed child tasks and delivery task.";
+  }
+  if (state === "Human Review") return "Open the latest agent chat and proof pack, then accept or request changes.";
+  if (state === "Running") return "Watch agent chats and proof capture while Codex works.";
+  if (state === "Planning") return "The planner is splitting the parent into child agent tasks.";
+  return "Move a configured work item to Ready to start or continue agent work.";
+}
+
 function toDashboardView(dashboard: Record<string, unknown>, runs: CodexFleetRun[]): ProjectDashboardView {
   const project = object(dashboard.project);
   const settings = object(project.codex_settings);
@@ -1570,6 +1686,27 @@ function toDashboardView(dashboard: Record<string, unknown>, runs: CodexFleetRun
     tokenUsage: tokenUsage(object(dashboard.token_usage)),
     runCount: runs.length,
     artifactCount: artifacts.length || runs.reduce((total, run) => total + (run.artifact_count || run.artifacts?.length || 0), 0),
+  };
+}
+
+function toProofPackView(dashboard: Record<string, unknown>): ProofPackView {
+  const proof = object(dashboard.proof_pack);
+  return {
+    status: value(proof.status, "not_started"),
+    previewUrl: value(proof.preview_url),
+    videoUrl: value(proof.video_url),
+    videoPath: value(proof.video_path),
+    screenshots: recordsOrStrings(proof.screenshots),
+    buildStatus: value(proof.build_status),
+    testStatus: value(proof.test_status),
+    changedFiles: recordsOrStrings(proof.changed_files),
+    branch: value(proof.branch),
+    worktree: value(proof.worktree),
+    primaryTask: value(proof.primary_task),
+    primaryRole: value(proof.primary_role, "test_reviewer"),
+    proofKind: value(proof.proof_kind),
+    proofWarning: value(proof.proof_warning),
+    proofLogPaths: recordsOrStrings(proof.proof_log_paths),
   };
 }
 
@@ -1666,6 +1803,20 @@ function toTimeline(events: Record<string, unknown>[], runs: CodexFleetRun[]) {
 function records(valueToRead: unknown): Record<string, unknown>[] {
   if (!Array.isArray(valueToRead)) return [];
   return valueToRead.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item));
+}
+
+function recordsOrStrings(valueToRead: unknown): string[] {
+  if (!Array.isArray(valueToRead)) return [];
+  return valueToRead
+    .map((item) => {
+      if (typeof item === "string") return item;
+      if (item && typeof item === "object" && !Array.isArray(item)) {
+        const record = item as Record<string, unknown>;
+        return value(record.path || record.name || record.id, "");
+      }
+      return value(item, "");
+    })
+    .filter(Boolean);
 }
 
 function object(valueToRead: unknown): Record<string, unknown> {

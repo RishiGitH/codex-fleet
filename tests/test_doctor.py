@@ -148,3 +148,29 @@ def test_doctor_checks_registered_project_harness(tmp_path: Path) -> None:
 
     assert any(f.code == "registered_project_harness_missing" for f in report.findings)
     assert any(f.code == "registered_project_plane_unlinked" for f in report.findings)
+
+
+def test_doctor_treats_stale_registered_projects_as_runtime_info(tmp_path: Path) -> None:
+    init_git_repo(tmp_path)
+    (tmp_path / "apps" / "plane").mkdir(parents=True)
+    stale = tmp_path / "stale"
+    stale.mkdir()
+    from codex_fleet.project_registry import ProjectRegistry, default_project_registry_path
+
+    registry = ProjectRegistry(default_project_registry_path(tmp_path))
+    stale_project = registry.add_project(stale, name="Stale")
+    stale.rmdir()
+    not_git = tmp_path.parent / f"{tmp_path.name}-not-git"
+    not_git.mkdir()
+    registry.add_project(not_git, name="Not Git")
+
+    report = scan_repo(tmp_path)
+    missing = next(f for f in report.findings if f.code == "registered_project_missing")
+    not_git_finding = next(f for f in report.findings if f.code == "registered_project_not_git")
+
+    assert stale_project.name in missing.message
+    assert missing.severity == "info"
+    assert "prune-stale" in missing.recommendation
+    assert not_git_finding.severity == "info"
+    assert "prune-stale" in not_git_finding.recommendation
+    assert not any("Not Git" in f.message and f.code == "registered_project_harness_missing" for f in report.findings)

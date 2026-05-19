@@ -362,6 +362,20 @@ def test_full_auto_parent_completes_after_children_pass_and_creates_delivery_tas
     store = RunStore(tmp_path / "runs.sqlite3")
     store.upsert_task_metadata(item_id="1", source="human-requested", depth=0, settings={"workflow_mode": "full_auto"})
     store.upsert_task_metadata(item_id="2", source="agent-followup", depth=1, parent_item_id="1", role="implementer")
+    store.upsert_run(
+        run_id="child-run",
+        item_id="2",
+        identifier="CF-2",
+        status="done",
+        branch_name="codex-fleet/CF-2",
+        worktree_path=str(repo / ".codex-fleet" / "workspaces" / "CF-2"),
+        agent_role="implementer",
+        settings={
+            "proof_kind": "cli_logs",
+            "proof_status": "cli_passed",
+            "proof_log_paths": [str(repo / ".codex-fleet" / "artifacts" / "child-run" / "pytest.log")],
+        },
+    )
 
     result = Orchestrator(config=config, tracker=tracker, runner=FakeRunner(), store=store).run_once()
 
@@ -369,7 +383,51 @@ def test_full_auto_parent_completes_after_children_pass_and_creates_delivery_tas
     assert tracker.fetch_items_by_ids(["1"])[0].state == "Done"
     delivery = [item for item in tracker.fetch_all_items() if item.title.startswith("Publish or merge result")]
     assert len(delivery) == 1
-    assert store.get_task_metadata(delivery[0].id).role == "delivery_manager"
+    delivery_metadata = store.get_task_metadata(delivery[0].id)
+    assert delivery_metadata.role == "delivery_manager"
+    assert delivery_metadata.settings["proof_kind"] == "cli_logs"
+    assert delivery_metadata.settings["proof_status"] == "cli_passed"
+    assert "Proof logs:" in (delivery[0].description or "")
+
+
+def test_full_auto_parent_accepts_child_human_review_without_manual_review(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    parent = WorkItem(id="1", identifier="CF-1", title="Parent", description=None, state="Planning")
+    child = WorkItem(id="2", identifier="CF-2", title="Child", description=None, state="Human Review")
+    tracker = MemoryTracker([parent, child], active_states=["Ready"])
+    config = FleetConfig(repo=repo, workspace=WorkspaceConfig(root=tmp_path / "workspaces")).resolved()
+    store = RunStore(tmp_path / "runs.sqlite3")
+    store.upsert_task_metadata(item_id="1", source="human-requested", depth=0, settings={"workflow_mode": "full_auto"})
+    store.upsert_task_metadata(
+        item_id="2",
+        source="agent-followup",
+        depth=1,
+        parent_item_id="1",
+        parent_identifier="CF-1",
+        role="implementer",
+        settings={"workflow_mode": "execute_only", "parent_workflow_mode": "full_auto", "agent_role": "implementer"},
+    )
+    store.upsert_run(
+        run_id="run-child",
+        item_id="2",
+        identifier="CF-2",
+        status="human_review",
+        branch_name="codex-fleet/CF-2",
+        worktree_path=str(tmp_path / "workspaces" / "CF-2"),
+        agent_role="implementer",
+        model="gpt-5.5",
+        reasoning_effort="low",
+        settings={"parent_workflow_mode": "full_auto"},
+    )
+
+    result = Orchestrator(config=config, tracker=tracker, runner=FakeRunner(), store=store).run_once()
+
+    assert result.message == "Full auto parent completed."
+    assert tracker.fetch_items_by_ids(["2"])[0].state == "Done"
+    assert store.get_run("run-child").status == "done"
+    assert "accepted this agent task automatically" in tracker.comments["2"][-1]
 
 
 def test_full_auto_parent_completes_even_if_parent_column_drifted(tmp_path: Path) -> None:

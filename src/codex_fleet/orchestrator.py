@@ -55,6 +55,7 @@ class Orchestrator:
         self.worktrees = WorktreeManager(config.repo, config.workspace.root)
 
     def run_once(self) -> OrchestratorResult:
+        self._normalize_full_auto_child_review_states()
         completed_parent = self._complete_ready_full_auto_parent()
         if completed_parent is not None:
             return completed_parent
@@ -212,6 +213,13 @@ class Orchestrator:
                 run.settings["screenshot_paths"] = [str(path) for path in result.screenshot_paths]
             if result.test_proof_status:
                 run.settings["test_proof_status"] = result.test_proof_status
+                run.settings["proof_status"] = result.test_proof_status
+            if result.proof_kind:
+                run.settings["proof_kind"] = result.proof_kind
+            if result.proof_warning:
+                run.settings["proof_warning"] = result.proof_warning
+            if result.proof_log_paths:
+                run.settings["proof_log_paths"] = [str(path) for path in result.proof_log_paths]
             self._persist(run)
             self._messages(run, result.messages)
             self._event(
@@ -264,7 +272,7 @@ class Orchestrator:
                     return OrchestratorResult(True, run, "Run created child tasks and moved parent to Planning.")
                 if workflow_mode == "full_auto" and run.agent_role != "planner":
                     delivery_item = self._create_delivery_task(run, result.summary, result.test_commands)
-                    run.mark(RunStatus.HUMAN_REVIEW)
+                    run.mark(RunStatus.DONE)
                     self._persist(run)
                     self._artifacts(run, result.artifacts)
                     self._event(run, "parent_completed", {"state": WorkItemState.DONE.value, "delivery_item_id": delivery_item.id if delivery_item else None})
@@ -759,6 +767,70 @@ class Orchestrator:
                 return OrchestratorResult(False, None, "Full auto parent completed.")
         return None
 
+    def _normalize_full_auto_child_review_states(self) -> int:
+        """Accept successful full-auto child tasks automatically.
+
+        Full-auto parents are orchestration containers. Their child agents may
+        still land in Human Review after older daemon versions, stale Plane
+        state, or compatibility paths. Normalize those passing children to Done
+        before parent reconciliation so users do not need to manually review
+        every agent task in a full-auto demo flow.
+        """
+        if self.store is None:
+            return 0
+        accepted = 0
+        for parent_id in self.store.list_parent_item_ids_with_children():
+            parent_metadata = self.store.get_task_metadata(parent_id)
+            parent_settings = parent_metadata.settings if parent_metadata is not None else {}
+            if parent_settings.get("workflow_mode") != "full_auto":
+                continue
+            children_metadata = [
+                metadata
+                for metadata in self.store.list_child_task_metadata(parent_id)
+                if metadata.role != "delivery_manager"
+            ]
+            if not children_metadata:
+                continue
+            children = {
+                child.id: child
+                for child in self.tracker.fetch_items_by_ids([metadata.item_id for metadata in children_metadata])
+            }
+            for metadata in children_metadata:
+                child = children.get(metadata.item_id)
+                if child is None or child.state != WorkItemState.HUMAN_REVIEW.value:
+                    continue
+                latest = self.store.latest_run_for_item(metadata.item_id)
+                event_run_id = latest.id if latest is not None else _parent_event_run_id(parent_id)
+                duplicate = [
+                    event
+                    for event in self.store.list_events(event_run_id)
+                    if event.kind == "full_auto_child_accepted"
+                    and event.payload.get("item_id") == metadata.item_id
+                ]
+                if duplicate:
+                    self.tracker.update_item_state(metadata.item_id, WorkItemState.DONE.value)
+                    accepted += 1
+                    continue
+                if latest is not None and latest.status == RunStatus.HUMAN_REVIEW.value:
+                    self.store.update_run_status(latest.id, RunStatus.DONE.value)
+                self.store.add_event(
+                    event_run_id,
+                    "full_auto_child_accepted",
+                    {
+                        "item_id": metadata.item_id,
+                        "identifier": child.identifier,
+                        "state": WorkItemState.DONE.value,
+                        "parent_item_id": parent_id,
+                    },
+                )
+                self.tracker.create_comment(
+                    metadata.item_id,
+                    "codex-fleet accepted this agent task automatically because the parent is Full auto.",
+                )
+                self.tracker.update_item_state(metadata.item_id, WorkItemState.DONE.value)
+                accepted += 1
+        return accepted
+
     def _primary_child_run(self, children_metadata: Sequence[TaskMetadata]) -> StoredRun | None:
         if self.store is None:
             return None
@@ -777,16 +849,39 @@ class Orchestrator:
     def _aggregate_child_proof(self, children_metadata: Sequence[TaskMetadata]) -> dict[str, object]:
         if self.store is None:
             return {}
-        proof: dict[str, object] = {}
+        candidates: list[tuple[int, StoredRun]] = []
         for metadata in children_metadata:
             run = self.store.latest_run_for_item(str(metadata.item_id))
             if run is None:
                 continue
             settings = run.settings or {}
-            for key in ("preview_url", "test_video_path", "test_video_url", "screenshot_paths", "test_proof_status"):
-                value = settings.get(key)
-                if value and key not in proof:
-                    proof[key] = value
+            score = _proof_score(settings)
+            if score:
+                candidates.append((score, run))
+        if not candidates:
+            return {}
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        run = candidates[0][1]
+        settings = run.settings or {}
+        proof: dict[str, object] = {
+            "proof_source_run_id": run.id,
+            "proof_source_identifier": run.identifier,
+            "proof_source_role": run.agent_role,
+        }
+        for key in (
+            "preview_url",
+            "test_video_path",
+            "test_video_url",
+            "screenshot_paths",
+            "test_proof_status",
+            "proof_status",
+            "proof_kind",
+            "proof_warning",
+            "proof_log_paths",
+        ):
+            value = settings.get(key)
+            if value:
+                proof[key] = value
         return proof
 
     def _record_parent_waiting_on_child(
@@ -883,10 +978,10 @@ class Orchestrator:
             f"Original blocker: {blocker_text}",
         )
         self.tracker.update_item_state(item.id, WorkItemState.DONE.value)
-        parent_id = self._root_parent_id(item)
-        if parent_id:
-            self.tracker.create_comment(parent_id, f"codex-fleet created repair task `{repair.identifier}` for `{item.identifier}`.")
-            self.tracker.update_item_state(parent_id, WorkItemState.PLANNING.value)
+        root_parent_id = self._root_parent_id(item)
+        if root_parent_id:
+            self.tracker.create_comment(root_parent_id, f"codex-fleet created repair task `{repair.identifier}` for `{item.identifier}`.")
+            self.tracker.update_item_state(root_parent_id, WorkItemState.PLANNING.value)
         return OrchestratorResult(True, run, f"Full auto created repair task {repair.identifier}.")
 
     def _create_full_auto_fallback_tasks(
@@ -1008,6 +1103,15 @@ class Orchestrator:
         preview_url = str(run.settings.get("preview_url") or "Not reported by the latest agent run.")
         video_path = str(run.settings.get("test_video_path") or "Not reported")
         video_url = str(run.settings.get("test_video_url") or "")
+        proof_kind = str(run.settings.get("proof_kind") or "transcript_only")
+        proof_status = str(run.settings.get("proof_status") or run.settings.get("test_proof_status") or "not_reported")
+        proof_warning = str(run.settings.get("proof_warning") or "")
+        proof_logs = run.settings.get("proof_log_paths")
+        proof_log_lines = (
+            "\n".join(f"- `{path}`" for path in proof_logs if isinstance(path, str))
+            if isinstance(proof_logs, list) and proof_logs
+            else "- No proof logs reported"
+        )
         screenshots = run.settings.get("screenshot_paths")
         screenshot_lines = (
             "\n".join(f"- `{path}`" for path in screenshots if isinstance(path, str))
@@ -1032,6 +1136,10 @@ class Orchestrator:
             )
             + f"Playwright video: `{video_path}`\n\n"
             f"Screenshots:\n{screenshot_lines}\n\n"
+            f"Proof kind: `{proof_kind}`\n\n"
+            f"Proof status: `{proof_status}`\n\n"
+            f"Proof warning: {proof_warning or 'None'}\n\n"
+            f"Proof logs:\n{proof_log_lines}\n\n"
             "PR URL: Not created yet. If this repo has a GitHub origin, codex-fleet should create a draft PR before delivery completion.\n\n"
             "Mark this delivery task Done to merge the result and clean up the worktree. If merge or cleanup fails, codex-fleet will move this task to Needs Input and keep the worktree intact."
         )
@@ -1074,6 +1182,13 @@ class Orchestrator:
                     "test_video_path": video_path,
                     "test_video_url": video_url or None,
                     "screenshot_paths": screenshots if isinstance(screenshots, list) else [],
+                    "proof_kind": proof_kind,
+                    "proof_status": proof_status,
+                    "proof_warning": proof_warning or None,
+                    "proof_log_paths": proof_logs if isinstance(proof_logs, list) else [],
+                    "proof_source_run_id": run.settings.get("proof_source_run_id"),
+                    "proof_source_identifier": run.settings.get("proof_source_identifier"),
+                    "proof_source_role": run.settings.get("proof_source_role"),
                 },
             )
             self._event(run, "delivery_task_created", {"item_id": item.id, "identifier": item.identifier})
@@ -1164,6 +1279,19 @@ def _success_comment(
     if isinstance(screenshots, list) and screenshots:
         proof_lines.append("- Screenshots:")
         proof_lines.extend(f"  - `{path}`" for path in screenshots if isinstance(path, str))
+    proof_kind = run.settings.get("proof_kind")
+    proof_status = run.settings.get("proof_status") or run.settings.get("test_proof_status")
+    if isinstance(proof_kind, str) and proof_kind.strip():
+        proof_lines.append(f"- Proof kind: {proof_kind}")
+    if isinstance(proof_status, str) and proof_status.strip():
+        proof_lines.append(f"- Proof status: {proof_status}")
+    proof_warning = run.settings.get("proof_warning")
+    if isinstance(proof_warning, str) and proof_warning.strip():
+        proof_lines.append(f"- Proof warning: {proof_warning}")
+    proof_logs = run.settings.get("proof_log_paths")
+    if isinstance(proof_logs, list) and proof_logs:
+        proof_lines.append("- Proof logs:")
+        proof_lines.extend(f"  - `{path}`" for path in proof_logs if isinstance(path, str))
     proof = "\n\nTest proof:\n" + "\n".join(proof_lines) if proof_lines else ""
     proposed = ""
     if proposed_items:
@@ -1178,6 +1306,23 @@ def _success_comment(
         f"{proof}"
         f"{proposed}"
     )
+
+
+def _proof_score(settings: dict[str, object]) -> int:
+    proof_kind = str(settings.get("proof_kind") or "")
+    proof_status = str(settings.get("proof_status") or settings.get("test_proof_status") or "")
+    if settings.get("test_video_url") or settings.get("test_video_path"):
+        return 50
+    screenshots = settings.get("screenshot_paths")
+    if isinstance(screenshots, list) and screenshots:
+        return 40
+    if proof_kind == "browser_video" or proof_status in {"passed", "video_failed"}:
+        return 35
+    if proof_kind == "cli_logs" or proof_status.startswith("cli_"):
+        return 25
+    if proof_kind == "transcript_only" or proof_status == "transcript_only":
+        return 10
+    return 0
 
 
 def _artifact_kind(path: Path) -> str:

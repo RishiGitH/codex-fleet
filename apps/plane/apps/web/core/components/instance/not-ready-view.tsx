@@ -4,10 +4,51 @@
  * See the LICENSE file for details.
  */
 
+"use client";
+
+import { useMemo, useState } from "react";
+import type { MouseEvent } from "react";
+import { useSearchParams } from "next/navigation";
+
+import {
+  CodexFleetLocalApi,
+  DEFAULT_CODEX_FLEET_API_URL,
+  ensureCodexFleetLocalConnection,
+} from "@/app/codex-fleet/local-api";
 import DefaultLayout from "@/layouts/default-layout";
 import { Button } from "@plane/propel/button";
 
 export function InstanceNotReady() {
+  const searchParams = useSearchParams();
+  const [isConnecting, setIsConnecting] = useState(false);
+  const [connectionMessage, setConnectionMessage] = useState("");
+  const nextPath = useMemo(() => {
+    const raw = searchParams.get("next_path") || "/codex-fleet/dashboard";
+    const normalized = raw.trim().replace(/^\/+/, "");
+    if (!normalized || /^https?:\/\//i.test(normalized) || normalized.startsWith("//")) return "codex-fleet/dashboard";
+    return normalized;
+  }, [searchParams]);
+  const dashboardHref = useMemo(() => `/${nextPath}`, [nextPath]);
+
+  const openCodexFleet = async (event: MouseEvent<HTMLAnchorElement>) => {
+    event.preventDefault();
+    setIsConnecting(true);
+    setConnectionMessage("");
+    try {
+      const connection = await ensureCodexFleetLocalConnection();
+      const apiUrl = connection.apiUrl || DEFAULT_CODEX_FLEET_API_URL;
+      if (connection.token) {
+        const result = await new CodexFleetLocalApi({ baseUrl: apiUrl, token: connection.token }).planeLoginUrl(nextPath);
+        window.location.assign(result.url);
+        return;
+      }
+      window.location.assign(new CodexFleetLocalApi({ baseUrl: apiUrl, token: null }).connectUrl(nextPath));
+    } catch (error) {
+      setConnectionMessage(error instanceof Error ? error.message : "Could not connect to Codex Fleet.");
+      setIsConnecting(false);
+    }
+  };
+
   return (
     <DefaultLayout>
       <main className="relative z-10 min-h-dvh overflow-hidden bg-[oklch(13%_0.012_255)] text-[oklch(96%_0.006_255)]">
@@ -42,15 +83,20 @@ export function InstanceNotReady() {
               </p>
 
               <div className="mt-8 grid max-w-sm gap-3">
-                <a href="/codex-fleet/dashboard" className="block">
+                <a href={dashboardHref} className="block" onClick={openCodexFleet}>
                   <Button
                     variant="primary"
                     className="h-12 w-full bg-[oklch(76%_0.16_210)] text-[oklch(15%_0.016_255)] hover:bg-[oklch(82%_0.13_210)]"
                     size="xl"
                   >
-                    Open Codex Fleet
+                    {isConnecting ? "Connecting..." : "Open Codex Fleet"}
                   </Button>
                 </a>
+                {connectionMessage ? (
+                  <p className="text-pretty rounded-md border border-[oklch(75%_0.14_50/0.35)] bg-[oklch(75%_0.14_50/0.1)] px-3 py-2 text-sm leading-6 text-[oklch(86%_0.12_65)]">
+                    {connectionMessage}
+                  </p>
+                ) : null}
                 <a
                   href="/codex-fleet/onboarding"
                   className="inline-flex h-11 items-center justify-center rounded-md border border-[oklch(100%_0_0/0.12)] px-4 text-sm font-semibold text-[oklch(89%_0.02_255)] hover:border-[oklch(72%_0.14_210/0.55)] hover:text-[oklch(82%_0.13_210)]"

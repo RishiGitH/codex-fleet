@@ -136,7 +136,7 @@ def scan_repo(repo: Path, *, codex_command: str = "codex exec") -> DoctorReport:
     elif codex_binary:
         findings.extend(_codex_cli_preflight_findings(codex_command))
 
-    penalty = sum({"error": 35, "warning": 12, "info": 5}[f.severity] for f in findings)
+    penalty = sum(_finding_penalty(f) for f in findings)
     score = max(0, 100 - penalty)
     return DoctorReport(repo=repo, score=score, findings=tuple(findings))
 
@@ -191,9 +191,9 @@ def _registered_project_findings(repo: Path) -> list[DoctorFinding]:
             findings.append(
                 DoctorFinding(
                     "registered_project_missing",
-                    "error",
+                    "info",
                     f"{prefix} folder is missing: {project.repo_path}",
-                    "Delete/reset stale .codex-fleet runtime state or recreate the local project.",
+                    "Run `codex-fleet project prune-stale --repo .` to preview cleanup, then re-run with `--apply` to remove stale local registry rows.",
                 )
             )
             continue
@@ -201,11 +201,12 @@ def _registered_project_findings(repo: Path) -> list[DoctorFinding]:
             findings.append(
                 DoctorFinding(
                     "registered_project_not_git",
-                    "error",
+                    "info",
                     f"{prefix} is not a git repository.",
-                    "Initialize git in the project folder or recreate it through the Plane project flow.",
+                    "Initialize git if this folder should be a project, or run `codex-fleet project prune-stale --repo .` to remove stale local registry rows.",
                 )
             )
+            continue
         for relative in ("AGENTS.md", ".codex/config.toml", ".codex-fleet/project.json"):
             if not (project.repo_path / relative).exists():
                 findings.append(
@@ -226,6 +227,12 @@ def _registered_project_findings(repo: Path) -> list[DoctorFinding]:
                 )
             )
     return findings
+
+
+def _finding_penalty(finding: DoctorFinding) -> int:
+    if finding.code in {"registered_project_missing", "registered_project_not_git"}:
+        return 0
+    return {"error": 35, "warning": 12, "info": 5}[finding.severity]
 
 
 def _command_binary(command: str) -> str | None:

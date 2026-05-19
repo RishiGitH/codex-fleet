@@ -69,6 +69,16 @@ class WorktreeManager:
                 if retry_fallback.returncode == 0:
                     return Workspace(path=path, branch_name=branch, created_now=True)
                 fallback = retry_fallback
+                forced_fallback = subprocess.run(
+                    ["git", "worktree", "add", "-f", str(path), branch],
+                    cwd=self.repo,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                if forced_fallback.returncode == 0:
+                    return Workspace(path=path, branch_name=branch, created_now=True)
+                fallback = forced_fallback
 
             retry = self._try_suffixed_branch(path, branch, base_branch=base_branch)
             if retry is None:

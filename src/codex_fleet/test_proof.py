@@ -9,11 +9,14 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 from urllib.request import Request, urlopen
 
 from codex_fleet.harness import plan_harness
 
 CommandRunner = Callable[[Sequence[str], Path, int, Path], subprocess.CompletedProcess[str]]
+ProofTargetKind = Literal["browser_static", "browser_dev", "browser_file", "cli", "transcript_only"]
+ProofKind = Literal["browser_video", "cli_logs", "transcript_only"]
 
 
 @dataclass(frozen=True)
@@ -23,10 +26,22 @@ class TestProofResult:
     preview_url: str | None
     commands: tuple[str, ...]
     artifacts: tuple[Path, ...]
+    proof_kind: ProofKind = "transcript_only"
+    warning: str | None = None
+    log_paths: tuple[Path, ...] = ()
     video_path: Path | None = None
     video_url: str | None = None
     screenshot_paths: tuple[Path, ...] = ()
     error: str | None = None
+
+
+@dataclass(frozen=True)
+class ProofTarget:
+    kind: ProofTargetKind
+    command: str | None = None
+    static_root: Path | None = None
+    html_path: Path | None = None
+    commands: tuple[str, ...] = ()
 
 
 def run_test_proof(
@@ -43,17 +58,29 @@ def run_test_proof(
     artifacts: list[Path] = []
 
     scan = plan_harness(workspace).scan
-    if scan.stack != "node" or scan.dev_command is None:
-        summary = "No runnable web preview was detected, so Test Agent proof was skipped."
-        skipped = artifact_dir / "test-proof-skipped.txt"
-        skipped.write_text(summary + "\n")
+    target = detect_proof_target(workspace)
+    if target.kind == "transcript_only":
+        summary = "No runnable browser or CLI proof target was detected; transcript proof was recorded."
+        proof = _write_proof_summary(
+            artifact_dir,
+            target=target,
+            status="transcript_only",
+            commands=(),
+            artifacts=(),
+            warning=summary,
+        )
         return TestProofResult(
-            status="skipped",
+            status="transcript_only",
             summary=summary,
             preview_url=None,
-            commands=("test proof skipped: no runnable web preview",),
-            artifacts=(skipped,),
+            commands=("proof transcript_only: no runnable target detected",),
+            artifacts=(proof,),
+            proof_kind="transcript_only",
+            warning=summary,
+            log_paths=(proof,),
         )
+    if target.kind == "cli":
+        return _run_cli_proof(target, workspace, artifact_dir, timeout_seconds=timeout_seconds, command_runner=command_runner)
 
     runner = command_runner or _run_command_artifact
     install_command = scan.install_command
@@ -63,7 +90,7 @@ def run_test_proof(
         commands.append(install_command)
         artifacts.append(install_log)
         if install_result.returncode != 0:
-            return _failed("Dependency installation failed.", commands, artifacts, install_result.stdout, install_log)
+            return _failed("Dependency installation failed.", commands, artifacts, install_result.stdout, install_log, target=target, proof_kind="browser_video")
 
     if scan.build_command:
         build_log = artifact_dir / "build.log"
@@ -71,18 +98,18 @@ def run_test_proof(
         commands.append(scan.build_command)
         artifacts.append(build_log)
         if build_result.returncode != 0:
-            return _failed("Build failed before preview proof could run.", commands, artifacts, build_result.stdout, build_log)
+            return _failed("Build failed before preview proof could run.", commands, artifacts, build_result.stdout, build_log, target=target, proof_kind="browser_video")
 
     browser_error = ensure_playwright_browsers(workspace)
     if browser_error:
         proof = artifact_dir / "playwright-setup-error.txt"
         proof.write_text(browser_error + "\n")
-        return _failed("Playwright browser setup failed.", commands, [*artifacts, proof], browser_error, proof)
+        return _failed("Playwright browser setup failed.", commands, [*artifacts, proof], browser_error, proof, target=target, proof_kind="browser_video")
 
     port = _free_port()
     preview_url = f"http://127.0.0.1:{port}"
     preview_log = artifact_dir / "preview.log"
-    dev_command = _command_with_port(scan.dev_command, port, workspace)
+    dev_command = _preview_command(target, scan.dev_command, port, workspace)
     commands.append(dev_command)
     preview_process = _start_preview_process(dev_command, workspace, port, preview_log)
     artifacts.append(preview_log)
@@ -90,34 +117,65 @@ def run_test_proof(
     try:
         ready_error = _wait_for_http(preview_url, timeout_seconds=min(60, timeout_seconds))
         if ready_error:
-            return _failed("Preview server did not become ready.", commands, artifacts, ready_error, preview_log)
+            if target.kind == "browser_static" and target.html_path is not None:
+                file_url = target.html_path.resolve().as_uri()
+                commands.append("python playwright chromium capture file:// fallback")
+                capture = _capture_playwright(file_url, artifact_dir)
+                artifacts.extend(capture.artifacts)
+                commands.extend(capture.commands)
+                if capture.error:
+                    return _failed(
+                        "Preview server and file fallback capture failed.",
+                        commands,
+                        artifacts,
+                        f"{ready_error}; {capture.error}",
+                        capture.artifacts[-1] if capture.artifacts else preview_log,
+                        target=ProofTarget("browser_file", html_path=target.html_path),
+                        proof_kind="browser_video",
+                    )
+                video_url = _serve_artifacts_for_video(artifact_dir, capture.video_path)
+                metadata, summary_path = _write_browser_metadata(
+                    artifact_dir,
+                    preview_url=file_url,
+                    video_path=capture.video_path,
+                    video_url=video_url,
+                    screenshot_paths=capture.screenshot_paths,
+                    warning=f"Static localhost preview failed, captured file fallback instead: {ready_error}",
+                )
+                summary = "Preview proof passed using file fallback: screenshots and video were captured."
+                artifacts.extend([metadata, summary_path])
+                return TestProofResult(
+                    status="passed",
+                    summary=summary,
+                    preview_url=file_url,
+                    commands=tuple(commands),
+                    artifacts=tuple(dict.fromkeys(artifacts)),
+                    proof_kind="browser_video",
+                    warning=f"Static localhost preview failed, captured file fallback instead: {ready_error}",
+                    log_paths=(preview_log,),
+                    video_path=capture.video_path,
+                    video_url=video_url,
+                    screenshot_paths=capture.screenshot_paths,
+                )
+            return _failed("Preview server did not become ready.", commands, artifacts, ready_error, preview_log, target=target, proof_kind="browser_video")
         capture = _capture_playwright(preview_url, artifact_dir)
         artifacts.extend(capture.artifacts)
         commands.extend(capture.commands)
         if capture.error:
-            return _failed("Playwright capture failed.", commands, artifacts, capture.error, capture.artifacts[-1] if capture.artifacts else preview_log)
+            return _failed("Playwright capture failed.", commands, artifacts, capture.error, capture.artifacts[-1] if capture.artifacts else preview_log, target=target, proof_kind="browser_video")
         video_url = _serve_artifacts_for_video(artifact_dir, capture.video_path)
         keep_preview = True
         preview_pid = getattr(preview_process, "pid", None)
         if preview_pid is not None:
             (artifact_dir / "preview-pid.txt").write_text(f"{preview_pid}\n")
-        metadata = artifact_dir / "preview-metadata.json"
-        metadata.write_text(
-            json.dumps(
-                {
-                    "preview_url": preview_url,
-                    "video_path": str(capture.video_path) if capture.video_path else None,
-                    "video_url": video_url,
-                    "screenshots": [str(path) for path in capture.screenshot_paths],
-                },
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n"
+        metadata, summary_path = _write_browser_metadata(
+            artifact_dir,
+            preview_url=preview_url,
+            video_path=capture.video_path,
+            video_url=video_url,
+            screenshot_paths=capture.screenshot_paths,
         )
-        summary_path = artifact_dir / "test-summary.txt"
-        summary = "Preview proof passed: build completed, preview loaded, screenshots and video were captured."
-        summary_path.write_text(summary + f"\nPreview URL: {preview_url}\nVideo URL: {video_url or 'Unavailable'}\n")
+        summary = "Preview proof passed: browser preview loaded, screenshots and video were captured."
         artifacts.extend([metadata, summary_path])
         return TestProofResult(
             status="passed",
@@ -125,6 +183,8 @@ def run_test_proof(
             preview_url=preview_url,
             commands=tuple(commands),
             artifacts=tuple(dict.fromkeys(artifacts)),
+            proof_kind="browser_video",
+            log_paths=(preview_log, capture.artifacts[-1]) if capture.artifacts else (preview_log,),
             video_path=capture.video_path,
             video_url=video_url,
             screenshot_paths=capture.screenshot_paths,
@@ -134,6 +194,20 @@ def run_test_proof(
             _stop_process(preview_process)
 
 
+def detect_proof_target(workspace: Path) -> ProofTarget:
+    workspace = workspace.expanduser().resolve()
+    scan = plan_harness(workspace).scan
+    index = workspace / "index.html"
+    if scan.stack == "node" and scan.dev_command is not None:
+        return ProofTarget("browser_dev", command=scan.dev_command)
+    if index.exists():
+        return ProofTarget("browser_static", command="python -m http.server", static_root=workspace, html_path=index)
+    cli_commands = tuple(command for command in (scan.build_command, scan.test_command, scan.lint_command, scan.typecheck_command) if command)
+    if cli_commands:
+        return ProofTarget("cli", commands=cli_commands)
+    return ProofTarget("transcript_only")
+
+
 def ensure_playwright_browsers(workspace: Path) -> str | None:
     tooling_root = workspace.parents[2] if len(workspace.parents) >= 3 and workspace.parents[2].name == ".codex-fleet" else workspace / ".codex-fleet"
     browsers_path = tooling_root / "tooling" / "playwright-browsers"
@@ -141,7 +215,7 @@ def ensure_playwright_browsers(workspace: Path) -> str | None:
     os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers_path)
     env = {**os.environ, "PLAYWRIGHT_BROWSERS_PATH": str(browsers_path)}
     try:
-        import playwright.sync_api  # type: ignore[import-not-found]  # noqa: F401
+        import playwright.sync_api  # noqa: F401
     except ImportError:
         return "Python package `playwright` is not installed in the Codex Fleet tooling environment."
     if any(path.name.startswith("chromium") for path in browsers_path.iterdir()):
@@ -187,14 +261,31 @@ def _capture_playwright(preview_url: str, artifact_dir: Path) -> _CaptureResult:
             body_text = page.locator("body").inner_text(timeout=10_000).strip()
             if not body_text:
                 raise RuntimeError("preview page rendered blank body text")
+            page.wait_for_timeout(2000)
             page.screenshot(path=str(desktop), full_page=True)
+            for fraction in (0.28, 0.56, 0.84):
+                page.evaluate(f"window.scrollTo({{ top: Math.floor(document.body.scrollHeight * {fraction}), behavior: 'smooth' }})")
+                page.wait_for_timeout(1800)
+            page.evaluate("window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' })")
+            page.wait_for_timeout(2200)
+            page.evaluate("window.scrollTo({ top: 0, behavior: 'smooth' })")
+            page.wait_for_timeout(1800)
             page.set_viewport_size({"width": 390, "height": 844})
+            page.wait_for_timeout(1200)
             page.screenshot(path=str(mobile), full_page=True)
+            page.evaluate("window.scrollTo({ top: Math.floor(document.body.scrollHeight * 0.5), behavior: 'smooth' })")
+            page.wait_for_timeout(1800)
+            page.evaluate("window.scrollTo({ top: 0, behavior: 'smooth' })")
+            page.wait_for_timeout(1200)
             video = page.video
             context.close()
             browser.close()
             video_path = Path(video.path()).resolve() if video is not None else None
-            capture_log.write_text(f"Captured {preview_url}\nBody text length: {len(body_text)}\n")
+            capture_log.write_text(
+                f"Captured {preview_url}\n"
+                f"Body text length: {len(body_text)}\n"
+                "Video walkthrough target: desktop top, progressive scroll, bottom hold, mobile screenshot, mobile scroll, and final hold.\n"
+            )
             artifacts = tuple(path for path in (desktop, mobile, video_path, capture_log) if path is not None)
             return _CaptureResult(commands=commands, artifacts=artifacts, video_path=video_path, screenshot_paths=(desktop, mobile))
     except Exception as exc:  # noqa: BLE001 - proof capture converts browser failures into artifacts.
@@ -224,6 +315,49 @@ def _run_command_artifact(command: Sequence[str], cwd: Path, timeout_seconds: in
     return completed
 
 
+def _run_cli_proof(
+    target: ProofTarget,
+    workspace: Path,
+    artifact_dir: Path,
+    *,
+    timeout_seconds: int,
+    command_runner: CommandRunner | None,
+) -> TestProofResult:
+    runner = command_runner or _run_command_artifact
+    commands: list[str] = []
+    artifacts: list[Path] = []
+    failed: list[str] = []
+    for command in target.commands:
+        log = artifact_dir / f"{_slug(command)}.log"
+        result = runner(_split_command(command), workspace, min(900, timeout_seconds), log)
+        commands.append(command)
+        artifacts.append(log)
+        if result.returncode != 0:
+            failed.append(f"{command} exited with {result.returncode}")
+    status = "cli_failed" if failed else "cli_passed"
+    warning = "; ".join(failed) if failed else None
+    summary = "CLI proof completed with failures." if failed else "CLI proof passed: detected commands completed."
+    proof = _write_proof_summary(
+        artifact_dir,
+        target=target,
+        status=status,
+        commands=tuple(commands),
+        artifacts=tuple(artifacts),
+        warning=warning,
+    )
+    artifacts.append(proof)
+    return TestProofResult(
+        status=status,
+        summary=summary,
+        preview_url=None,
+        commands=tuple(commands),
+        artifacts=tuple(dict.fromkeys(artifacts)),
+        proof_kind="cli_logs",
+        warning=warning,
+        log_paths=tuple(artifacts),
+    )
+
+
 def _start_preview_process(command: str, workspace: Path, port: int, preview_log: Path) -> subprocess.Popen[str]:
     return subprocess.Popen(
         _split_command(command),
@@ -234,6 +368,12 @@ def _start_preview_process(command: str, workspace: Path, port: int, preview_log
         env={**os.environ, "PORT": str(port), "HOST": "127.0.0.1"},
         start_new_session=True,
     )
+
+
+def _preview_command(target: ProofTarget, dev_command: str | None, port: int, workspace: Path) -> str:
+    if target.kind == "browser_static":
+        return f"{sys.executable} -m http.server {port} --bind 127.0.0.1"
+    return _command_with_port(dev_command or target.command or "", port, workspace)
 
 
 def _serve_artifacts_for_video(artifact_dir: Path, video_path: Path | None) -> str | None:
@@ -255,6 +395,74 @@ def _serve_artifacts_for_video(artifact_dir: Path, video_path: Path | None) -> s
     )
     (artifact_dir / "artifact-server-pid.txt").write_text(f"{process.pid}\n")
     return f"http://127.0.0.1:{port}/{relative.as_posix()}"
+
+
+def _write_browser_metadata(
+    artifact_dir: Path,
+    *,
+    preview_url: str,
+    video_path: Path | None,
+    video_url: str | None,
+    screenshot_paths: tuple[Path, ...],
+    warning: str | None = None,
+) -> tuple[Path, Path]:
+    metadata = artifact_dir / "preview-metadata.json"
+    metadata.write_text(
+        json.dumps(
+            {
+                "preview_url": preview_url,
+                "video_path": str(video_path) if video_path else None,
+                "video_url": video_url,
+                "screenshots": [str(path) for path in screenshot_paths],
+                "warning": warning,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    summary = "Preview proof passed: browser preview loaded, screenshots and video were captured."
+    summary_path = _write_proof_summary(
+        artifact_dir,
+        target=ProofTarget("browser_file" if preview_url.startswith("file:") else "browser_dev"),
+        status="passed",
+        commands=("python playwright chromium capture",),
+        artifacts=tuple(path for path in (video_path, *screenshot_paths, metadata) if path is not None),
+        warning=warning,
+        extra={"preview_url": preview_url, "video_url": video_url or "Unavailable"},
+    )
+    summary_path.write_text(summary_path.read_text().replace("Proof summary", summary, 1))
+    return metadata, summary_path
+
+
+def _write_proof_summary(
+    artifact_dir: Path,
+    *,
+    target: ProofTarget,
+    status: str,
+    commands: tuple[str, ...],
+    artifacts: tuple[Path, ...],
+    warning: str | None,
+    extra: dict[str, object] | None = None,
+) -> Path:
+    summary = artifact_dir / "proof-summary.txt"
+    lines = [
+        "Proof summary",
+        f"Target: {target.kind}",
+        f"Status: {status}",
+        f"Warning: {warning or 'None'}",
+        "Commands:",
+        *(f"- {command}" for command in commands),
+        *([] if commands else ["- None"]),
+        "Artifacts:",
+        *(f"- {path}" for path in artifacts),
+        *([] if artifacts else ["- None"]),
+    ]
+    if extra:
+        lines.append("Metadata:")
+        lines.extend(f"- {key}: {value}" for key, value in extra.items())
+    summary.write_text("\n".join(lines) + "\n")
+    return summary
 
 
 def _command_with_port(command: str, port: int, workspace: Path) -> str:
@@ -320,12 +528,37 @@ def _stop_process(process: subprocess.Popen[str]) -> None:
         process.wait(timeout=5)
 
 
-def _failed(summary: str, commands: list[str], artifacts: list[Path], error_text: str, primary_artifact: Path) -> TestProofResult:
+def _failed(
+    summary: str,
+    commands: list[str],
+    artifacts: list[Path],
+    error_text: str,
+    primary_artifact: Path,
+    *,
+    target: ProofTarget,
+    proof_kind: ProofKind,
+) -> TestProofResult:
+    warning = f"{summary} {error_text}".strip()
+    proof = _write_proof_summary(
+        primary_artifact.parent,
+        target=target,
+        status="video_failed" if proof_kind == "browser_video" else "cli_failed",
+        commands=tuple(commands),
+        artifacts=tuple(artifacts),
+        warning=warning,
+    )
     return TestProofResult(
-        status="failed",
-        summary=f"{summary} {error_text}".strip(),
+        status="video_failed" if proof_kind == "browser_video" else "cli_failed",
+        summary=warning,
         preview_url=None,
         commands=tuple(commands),
-        artifacts=tuple(dict.fromkeys(artifacts)),
+        artifacts=tuple(dict.fromkeys((*artifacts, proof))),
+        proof_kind=proof_kind,
+        warning=warning,
+        log_paths=tuple(dict.fromkeys((*artifacts, proof))),
         error=f"{summary} See {primary_artifact}.",
     )
+
+
+def _slug(value: str) -> str:
+    return "".join(character if character.isalnum() else "-" for character in value.lower()).strip("-")[:80] or "command"

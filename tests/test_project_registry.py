@@ -193,6 +193,19 @@ def test_project_registry_rejects_missing_folder(tmp_path: Path) -> None:
         registry.add_project(tmp_path / "missing")
 
 
+def test_project_registry_deletes_local_registration_only(tmp_path: Path) -> None:
+    project_dir = tmp_path / "app"
+    project_dir.mkdir()
+    registry = ProjectRegistry(tmp_path / "projects.sqlite3")
+    project = registry.add_project(project_dir)
+
+    assert registry.delete_project(project.id) is True
+
+    assert registry.get_project(project.id) is None
+    assert project_dir.exists()
+    assert registry.delete_project(project.id) is False
+
+
 def test_slugify_has_stable_fallback() -> None:
     assert slugify("Codex Fleet!") == "codex-fleet"
     assert slugify("!!!") == "project"

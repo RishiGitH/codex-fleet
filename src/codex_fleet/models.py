@@ -115,6 +115,9 @@ class RunResult:
     test_video_url: str | None = None
     screenshot_paths: tuple[Path, ...] = ()
     test_proof_status: str | None = None
+    proof_kind: str | None = None
+    proof_warning: str | None = None
+    proof_log_paths: tuple[Path, ...] = ()
     error: str | None = None
 
 

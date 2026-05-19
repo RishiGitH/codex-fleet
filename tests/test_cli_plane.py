@@ -1,10 +1,11 @@
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
 from click.testing import CliRunner
 
-from codex_fleet.cli.main import main
+from codex_fleet.cli.main import _daemon_tick_logger, main
 from codex_fleet.config import load_config
 from codex_fleet.factory import default_store_path
 from codex_fleet.lifecycle import StopResult
@@ -16,6 +17,7 @@ from codex_fleet.plane_manager import (
     PlaneManagerError,
     PlaneStatus,
 )
+from codex_fleet.project_registry import ProjectRegistry, default_project_registry_path
 from codex_fleet.store import RunStore
 
 
@@ -101,6 +103,64 @@ def test_removed_plane_source_and_patch_commands_are_not_public() -> None:
     assert patch_result.exit_code != 0
 
 
+def test_project_prune_stale_is_dry_run_until_apply(tmp_path: Path) -> None:
+    stale = tmp_path / "stale"
+    stale.mkdir()
+    registry = ProjectRegistry(default_project_registry_path(tmp_path))
+    project = registry.add_project(stale, name="Stale Project")
+    stale.rmdir()
+
+    dry_run = CliRunner().invoke(main, ["project", "prune-stale", "--repo", str(tmp_path)])
+
+    assert dry_run.exit_code == 0
+    assert "Dry run only" in dry_run.output
+    assert "folder missing" in dry_run.output
+    assert registry.get_project(project.id) is not None
+
+    applied = CliRunner().invoke(main, ["project", "prune-stale", "--repo", str(tmp_path), "--apply"])
+
+    assert applied.exit_code == 0
+    assert "Removed 1 stale" in applied.output
+    assert registry.get_project(project.id) is None
+
+
+def test_project_prune_stale_removes_older_duplicate_plane_mapping(tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    subprocess.run(["git", "-C", str(first), "init"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(second), "init"], check=True, capture_output=True)
+    registry = ProjectRegistry(default_project_registry_path(tmp_path))
+    old = registry.add_project(first, name="Old")
+    new = registry.add_project(second, name="New")
+    registry.update_plane_mapping(old.id, workspace_slug="codex-local", project_id_in_plane="plane-project")
+    registry.update_plane_mapping(new.id, workspace_slug="codex-local", project_id_in_plane="plane-project")
+
+    applied = CliRunner().invoke(main, ["project", "prune-stale", "--repo", str(tmp_path), "--apply"])
+
+    assert applied.exit_code == 0
+    assert "duplicate Plane project mapping" in applied.output
+    assert registry.get_project(old.id) is None
+    assert registry.get_project(new.id) is not None
+
+
+def test_daemon_tick_logger_marks_stale_project_as_skipped(capsys) -> None:
+    _daemon_tick_logger(
+        1,
+        [
+            SimpleNamespace(
+                repo="/tmp/missing",
+                error=SimpleNamespace(message="Project folder is missing."),
+            )
+        ],
+    )
+
+    output = capsys.readouterr().out
+    assert "skipped stale project" in output
+    assert "error:" not in output
+
+
 def test_plane_fork_preview_prepare_only(tmp_path: Path, monkeypatch) -> None:
     build_dir = tmp_path / "apps" / "plane" / "apps" / "web" / "build" / "client"
 
@@ -151,6 +211,10 @@ def test_up_bootstraps_plane_and_opens_board_when_config_is_missing(tmp_path: Pa
     monkeypatch.setattr("codex_fleet.cli.main.build_plane_client", lambda _config: object())
     monkeypatch.setattr(
         "codex_fleet.cli.main.wait_for_plane",
+        lambda _url: PlaneStatus(url="http://127.0.0.1:17880", ready=True, message="HTTP 200 at /"),
+    )
+    monkeypatch.setattr(
+        "codex_fleet.cli.main.check_plane_url",
         lambda _url: PlaneStatus(url="http://127.0.0.1:17880", ready=True, message="HTTP 200 at /"),
     )
     monkeypatch.setattr(

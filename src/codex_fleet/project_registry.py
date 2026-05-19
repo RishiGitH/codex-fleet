@@ -213,6 +213,16 @@ class ProjectRegistry:
             ).fetchone()
         return _project_from_row(row) if row is not None else None
 
+    def delete_project(self, project_id: int) -> bool:
+        """Remove one local project registration.
+
+        This only deletes codex-fleet runtime metadata. It never removes the
+        project folder, Plane project, worktrees, or run artifacts.
+        """
+        with self._connect() as db:
+            cursor = db.execute("delete from projects where id = ?", (project_id,))
+        return cursor.rowcount > 0
+
     def update_harness_status(self, project_id: int, status: str) -> None:
         with self._connect() as db:
             db.execute(

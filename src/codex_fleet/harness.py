@@ -337,10 +337,9 @@ def _workflow_md() -> str:
 
 Default work item flow:
 
-Backlog -> Ready -> Running -> Human Review -> Done
+Backlog -> Ready -> Planning -> Running -> Needs Input -> Human Review -> Done
 
-Failed or incomplete work goes to Rework.
-Blocked work goes to Blocked.
+Human-action blockers go to Needs Input with a clear question or retry step.
 
 Task source labels:
 
@@ -356,7 +355,7 @@ def _codex_config() -> str:
     return """model = \"gpt-5.5\"
 model_reasoning_effort = \"low\"
 sandbox_mode = \"workspace-write\"
-approval_policy = \"on-request\"
+approval_policy = \"never\"
 
 [agents]
 max_threads = 3

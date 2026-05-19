@@ -154,31 +154,10 @@ class CodexAppServerRunner(Runner):
                 suggested_state=WorkItemState.NEEDS_INPUT.value,
             )
         token_usage = parse_token_usage(transcript_text)
-        if needs_input is not None:
-            return RunResult(
-                success=False,
-                summary=needs_input.question,
-                changed_files=changed_files,
-                test_commands=tuple(command for command in (install_command, "reported by Codex App Server") if command),
-                artifacts=tuple(path for path in (install_artifact, output_path) if path is not None),
-                proposed_tasks=proposed_tasks,
-                needs_input=needs_input,
-                token_usage=token_usage,
-                messages=messages,
-                codex_thread_id=outcome.thread_id,
-                codex_turn_id=outcome.turn_id,
-                error=needs_input.question,
-            )
-        proof_result = _verify_test_agent_output(workspace, role, run_id=self.run_id or item.safe_identifier)
+        proof_result = _collect_proof_output(workspace, run_id=self.run_id or item.safe_identifier)
         verification_artifacts = proof_result.artifacts
         verification_commands = proof_result.commands
-        verification_error = proof_result.error
-        if role == "test_reviewer" and verification_error:
-            needs_input = NeedsInput(
-                question=f"Test Agent could not verify the app: {verification_error}",
-                needed_to_continue=True,
-                suggested_state=WorkItemState.NEEDS_INPUT.value,
-            )
+        if needs_input is not None:
             return RunResult(
                 success=False,
                 summary=needs_input.question,
@@ -196,6 +175,9 @@ class CodexAppServerRunner(Runner):
                 test_video_url=proof_result.video_url,
                 screenshot_paths=proof_result.screenshot_paths,
                 test_proof_status=proof_result.status,
+                proof_kind=proof_result.proof_kind,
+                proof_warning=proof_result.warning,
+                proof_log_paths=proof_result.log_paths,
                 error=needs_input.question,
             )
         summary = _tail(transcript_text) or f"Codex {outcome.summary} for {item.identifier}."
@@ -217,6 +199,9 @@ class CodexAppServerRunner(Runner):
             test_video_url=proof_result.video_url,
             screenshot_paths=proof_result.screenshot_paths,
             test_proof_status=proof_result.status,
+            proof_kind=proof_result.proof_kind,
+            proof_warning=proof_result.warning,
+            proof_log_paths=proof_result.log_paths,
             error=None if outcome.completed else outcome.summary,
         )
 
@@ -581,6 +566,8 @@ def _message_from_app_server_payload(payload: dict[str, Any]) -> tuple[str, str]
     params = payload.get("params")
     content = _payload_text(params)
     if method == "item/agentMessage/delta":
+        if _is_protocol_noise(method, content):
+            return "ignore", ""
         return "assistant_delta", content
     if _is_protocol_noise(method, content):
         return "ignore", ""
@@ -640,17 +627,37 @@ def _payload_text(value: Any) -> str:
     if isinstance(value, str):
         return value
     if isinstance(value, dict):
-        for key in ("text", "message", "summary", "output", "content", "delta"):
+        for key in ("text", "message", "summary", "output", "content", "delta", "error", "result"):
             nested = value.get(key)
-            if isinstance(nested, str) and nested:
-                return nested
-        for nested in value.values():
             text = _payload_text(nested)
-            if text:
+            if text and not _is_protocol_noise("", text):
+                return text
+        for key, nested in value.items():
+            if key in {
+                "id",
+                "item_id",
+                "type",
+                "kind",
+                "role",
+                "name",
+                "source",
+                "target",
+                "method",
+                "status",
+                "provider",
+                "model",
+                "reasoning",
+                "created_at",
+                "updated_at",
+                "timestamp",
+            }:
+                continue
+            text = _payload_text(nested)
+            if text and not _is_protocol_noise("", text):
                 return text
     if isinstance(value, list):
         parts = [_payload_text(item) for item in value]
-        return "".join(part for part in parts if part)
+        return "\n".join(part for part in parts if part and not _is_protocol_noise("", part))
     return ""
 
 
@@ -1077,11 +1084,12 @@ class _ProofAdapterResult:
     video_url: str | None = None
     screenshot_paths: tuple[Path, ...] = ()
     status: str | None = None
+    proof_kind: str | None = None
+    warning: str | None = None
+    log_paths: tuple[Path, ...] = ()
 
 
-def _verify_test_agent_output(workspace: Path, role: str, *, run_id: str) -> _ProofAdapterResult:
-    if role != "test_reviewer":
-        return _ProofAdapterResult()
+def _collect_proof_output(workspace: Path, *, run_id: str) -> _ProofAdapterResult:
     result = run_test_proof(workspace, run_id=run_id)
     return _ProofAdapterResult(
         artifacts=result.artifacts,
@@ -1092,6 +1100,9 @@ def _verify_test_agent_output(workspace: Path, role: str, *, run_id: str) -> _Pr
         video_url=result.video_url,
         screenshot_paths=result.screenshot_paths,
         status=result.status,
+        proof_kind=result.proof_kind,
+        warning=result.warning,
+        log_paths=result.log_paths,
     )
 
 

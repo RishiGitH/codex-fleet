@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 import re
 import secrets
 import subprocess
@@ -308,9 +309,12 @@ class _Handler(BaseHTTPRequestHandler):
                 api_url=_server_api_url(self.server),
                 code=session_code,
             )
-            self.send_response(HTTPStatus.FOUND.value)
-            self.send_header("Location", redirect)
-            self.end_headers()
+            try:
+                session = create_local_plane_session(self.server.repo)
+            except PlaneLocalBootstrapError as exc:
+                self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            self._send_plane_login_redirect(redirect, session.session_key)
             return
         if path == "/api/plane/login":
             query = parse_qs(parsed.query)
@@ -773,17 +777,19 @@ class _Handler(BaseHTTPRequestHandler):
             setup_log.append(f"Local project registered: {project.repo_path}")
             project, plane_mapping = _ensure_plane_project_mapping(self.server, project)
             self._log(f"Plane project mapping: status={plane_mapping.get('status')} project_id={plane_mapping.get('project_id')}")
-            if require_plane_mapping and plane_mapping.get("status") != "linked":
+            successful_plane_mapping_statuses = {"linked", "created", "relinked"}
+            if require_plane_mapping and plane_mapping.get("status") not in successful_plane_mapping_statuses:
                 reason = str(plane_mapping.get("reason") or "Plane project mapping failed.")
                 self._send_error(HTTPStatus.BAD_REQUEST, reason, code="plane_mapping_failed")
                 return
-            if plane_mapping.get("status") == "linked":
+            if plane_mapping.get("status") in successful_plane_mapping_statuses:
                 setup_log.append(f"Plane project linked: {plane_mapping.get('project_id')}")
             else:
                 setup_log.append(f"Plane project mapping {plane_mapping.get('status')}: {plane_mapping.get('reason', 'no detail')}")
             written: list[Path] = []
             if apply_project_harness:
                 written = apply_harness(project.repo_path)
+                _sync_harness_settings(project.repo_path, project.codex_settings)
                 self._log(f"harness applied: files={len(written)}")
                 setup_log.append(f"Harness applied: {len(written)} files written.")
             plan = plan_harness(project.repo_path)
@@ -1178,9 +1184,15 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_error(HTTPStatus.NOT_FOUND, "Artifact file not found.")
             return
         body = artifact_path.read_bytes()
+        content_type = mimetypes.guess_type(artifact_path.name)[0] or "application/octet-stream"
         self.send_response(HTTPStatus.OK.value)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        origin = self.headers.get("Origin", "")
+        self.send_header("Access-Control-Allow-Origin", origin if _safe_loopback_origin(origin) else "null")
+        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Codex-Fleet-Token")
+        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Private-Network", "true")
         self.send_header("X-Codex-Fleet-Artifact-Kind", artifact.kind)
         self.send_header("X-Codex-Fleet-Artifact-Redaction", artifact.redaction)
         if artifact.sha256:
@@ -1303,6 +1315,7 @@ def _configure_codex_for_plane_project(server: LocalApiServer, payload: dict[str
     written: list[Path] = []
     if _bool_payload(payload, "apply_harness", default=True):
         written = apply_harness(project.repo_path)
+        _sync_harness_settings(project.repo_path, project.codex_settings)
         setup_log.append(f"Harness applied: {len(written)} files written.")
     plan = plan_harness(project.repo_path)
     server.registry.update_harness_status(project.id, plan.status)
@@ -1317,6 +1330,76 @@ def _configure_codex_for_plane_project(server: LocalApiServer, payload: dict[str
         "written": [str(path) for path in written],
         "setup_log": setup_log,
     }
+
+
+def _sync_harness_settings(repo: Path, settings: dict[str, Any]) -> None:
+    normalized = normalize_codex_settings(settings)
+    _sync_project_json(repo, normalized)
+    _sync_codex_toml(repo, normalized)
+
+
+def _sync_project_json(repo: Path, settings: dict[str, Any]) -> None:
+    path = repo / ".codex-fleet" / "project.json"
+    if not path.exists():
+        return
+    try:
+        payload = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    codex = payload.get("codex")
+    if not isinstance(codex, dict):
+        codex = {}
+    codex.update(
+        {
+            "workflow_mode": settings.get("workflow_mode"),
+            "model": settings.get("default_model"),
+            "reasoning_effort": settings.get("reasoning_effort"),
+            "approval_policy": settings.get("approval_policy"),
+            "sandbox_mode": settings.get("sandbox_mode"),
+            "max_depth": settings.get("max_depth"),
+            "max_parallel_agents": settings.get("max_parallel_agents"),
+            "subagents_enabled": settings.get("subagents_enabled"),
+            "enabled_agent_roles": settings.get("enabled_agent_roles"),
+            "agent_profiles": settings.get("agent_profiles"),
+            "delivery_policy": settings.get("delivery_policy"),
+            "test_policy": settings.get("test_policy"),
+        }
+    )
+    payload["codex"] = codex
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def _sync_codex_toml(repo: Path, settings: dict[str, Any]) -> None:
+    path = repo / ".codex" / "config.toml"
+    if not path.exists():
+        return
+    text = path.read_text()
+    replacements = {
+        "model": settings.get("default_model"),
+        "model_reasoning_effort": settings.get("reasoning_effort"),
+        "sandbox_mode": settings.get("sandbox_mode"),
+        "approval_policy": settings.get("approval_policy"),
+        "max_threads": settings.get("max_parallel_agents"),
+        "max_depth": settings.get("max_depth"),
+        "job_max_runtime_seconds": settings.get("job_timeout_seconds"),
+    }
+    for key, value in replacements.items():
+        if value is None:
+            continue
+        rendered = str(value).lower() if isinstance(value, bool) else str(value)
+        if isinstance(value, str):
+            rendered = json.dumps(value)
+        pattern = re.compile(rf"^({re.escape(key)}\s*=\s*).*$", flags=re.MULTILINE)
+        if pattern.search(text):
+            replacement = rendered
+
+            def replace_setting(match: re.Match[str], replacement: str = replacement) -> str:
+                return f"{match.group(1)}{replacement}"
+
+            text = pattern.sub(replace_setting, text)
+    path.write_text(text)
 
 
 def _comment_plane_project_configured(server: LocalApiServer, project: LocalProject, setup_log: list[str]) -> None:
@@ -1636,7 +1719,117 @@ def _fleet_dashboard_payload(repo: Path, project: LocalProject | None) -> dict[s
         "token_usage": _dashboard_token_usage(runs),
         "needs_input": [_needs_input_payload(item) for item in store.list_open_needs_input()],
         "worktrees": _worktrees_payload(repo),
+        "proof_pack": _proof_pack_payload(store, runs, artifacts),
     }
+
+
+def _proof_pack_payload(store: RunStore, runs: list[StoredRun], artifacts: list[StoredArtifact]) -> dict[str, Any]:
+    proof_runs = [run for run in runs if _run_has_proof(run)]
+    primary = (
+        sorted(proof_runs, key=lambda run: _proof_score(run.settings if isinstance(run.settings, dict) else {}), reverse=True)[0]
+        if proof_runs
+        else next((run for run in runs if run.agent_role in {"test_reviewer", "implementer", "quality_reviewer"}), None)
+    )
+    if primary is None:
+        return {
+            "status": "not_started",
+            "preview_url": None,
+            "video_url": None,
+            "video_path": None,
+            "screenshots": [],
+            "build_status": None,
+            "test_status": None,
+            "changed_files": [],
+            "branch": None,
+            "worktree": None,
+            "primary_run_id": None,
+            "primary_task": None,
+            "primary_role": None,
+            "proof_kind": None,
+            "proof_warning": None,
+            "proof_log_paths": [],
+            "artifact_count": len(artifacts),
+        }
+
+    settings = primary.settings if isinstance(primary.settings, dict) else {}
+    run_artifacts = [artifact for artifact in artifacts if artifact.run_id == primary.id]
+    all_paths = [artifact.path for artifact in run_artifacts]
+    screenshots = _string_list(settings.get("screenshot_paths")) or [
+        path for path in all_paths if path.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
+    ]
+    video_path = _first_string(settings.get("test_video_path")) or next(
+        (artifact.path for artifact in run_artifacts if artifact.kind in {"playwright_video", "video"} or artifact.path.lower().endswith((".webm", ".mp4"))),
+        None,
+    )
+    video_url = _first_string(settings.get("test_video_url"))
+    preview_url = _first_string(settings.get("preview_url"))
+    proof_status = _first_string(settings.get("proof_status")) or _first_string(settings.get("test_proof_status"))
+    proof_kind = _first_string(settings.get("proof_kind"))
+    proof_warning = _first_string(settings.get("proof_warning"))
+    proof_log_paths = _string_list(settings.get("proof_log_paths")) or [
+        artifact.path for artifact in run_artifacts if artifact.kind in {"test_summary", "build_log", "install_log", "preview_log", "file"} and artifact.path.lower().endswith((".log", ".txt"))
+    ]
+    events = store.list_events(primary.id)
+    changed_files = _changed_files_from_events(events)
+    active = any(run.status in _ACTIVE_RUN_STATUSES for run in runs)
+    failed = proof_status in {"failed", "video_failed", "cli_failed"} or primary.status in {RunStatus.FAILED.value, RunStatus.NEEDS_INPUT.value}
+    passed = proof_status in {"passed", "cli_passed", "transcript_only"} or bool(preview_url and (video_url or video_path or screenshots))
+    status = "running" if active else "failed" if failed else "passed" if passed else "not_started"
+    return {
+        "status": status,
+        "preview_url": preview_url,
+        "video_url": video_url,
+        "video_path": video_path,
+        "screenshots": screenshots,
+        "build_status": _first_string(settings.get("build_status") or settings.get("build_result")),
+        "test_status": proof_status,
+        "changed_files": changed_files,
+        "branch": primary.branch_name,
+        "worktree": primary.worktree_path,
+        "primary_run_id": primary.id,
+        "primary_task": primary.identifier,
+        "primary_role": primary.agent_role,
+        "proof_kind": proof_kind,
+        "proof_warning": proof_warning,
+        "proof_log_paths": proof_log_paths,
+        "artifact_count": len(run_artifacts),
+    }
+
+
+def _run_has_proof(run: StoredRun) -> bool:
+    settings = run.settings if isinstance(run.settings, dict) else {}
+    return any(
+        settings.get(key)
+        for key in ("preview_url", "test_video_path", "test_video_url", "screenshot_paths", "test_proof_status", "proof_status", "proof_kind", "proof_log_paths")
+    )
+
+
+def _proof_score(settings: dict[str, Any]) -> int:
+    proof_kind = _first_string(settings.get("proof_kind")) or ""
+    proof_status = _first_string(settings.get("proof_status")) or _first_string(settings.get("test_proof_status")) or ""
+    if _first_string(settings.get("test_video_url")) or _first_string(settings.get("test_video_path")):
+        return 50
+    if _string_list(settings.get("screenshot_paths")):
+        return 40
+    if proof_kind == "browser_video" or proof_status in {"passed", "video_failed"}:
+        return 35
+    if proof_kind == "cli_logs" or proof_status.startswith("cli_"):
+        return 25
+    if proof_kind == "transcript_only" or proof_status == "transcript_only":
+        return 10
+    return 0
+
+
+def _first_string(value: Any) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if item is not None and str(item).strip()]
 
 
 def _worktrees_payload(repo: Path) -> list[dict[str, Any]]:
@@ -1851,7 +2044,7 @@ def _recent_agents_payload(store: RunStore) -> list[dict[str, Any]]:
 def _transcript_previews_payload(store: RunStore, runs: list[StoredRun]) -> list[dict[str, Any]]:
     previews: list[dict[str, Any]] = []
     for run in runs[:25]:
-        messages = store.list_run_messages(run.id)[:3]
+        messages = _filter_run_messages_for_view(store.list_run_messages(run.id), view="chat")[:3]
         if not messages:
             continue
         previews.append({"run_id": run.id, "messages": [_run_message_payload(message) for message in messages]})
@@ -1896,12 +2089,14 @@ def _event_payload(event: StoredEvent) -> dict[str, Any]:
 def _artifact_payload(artifact: StoredArtifact) -> dict[str, Any]:
     return {
         "id": artifact.id,
+        "run_id": artifact.run_id,
         "path": artifact.path,
         "kind": artifact.kind,
         "size_bytes": artifact.size_bytes,
         "sha256": artifact.sha256,
         "redaction": artifact.redaction,
         "created_at": artifact.created_at,
+        "download_path": f"/api/runs/{artifact.run_id}/artifacts/{artifact.id}",
     }
 
 
