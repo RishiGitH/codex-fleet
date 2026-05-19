@@ -541,6 +541,40 @@ def test_local_api_can_retry_and_cancel_runs(tmp_path: Path) -> None:
         thread.join(timeout=5)
 
 
+def test_local_api_cancel_active_run_stays_cancel_requested(tmp_path: Path) -> None:
+    _init_git_repo(tmp_path)
+    store = RunStore(default_store_path(tmp_path))
+    store.upsert_run(
+        run_id="active-run",
+        item_id="memory-1",
+        identifier="CF-1",
+        status="running_codex",
+    )
+    assert store.try_claim_item("memory-1", "active-run") is True
+    local_items = LocalWorkItemStore(default_local_work_item_store_path(tmp_path))
+    local_items.update_item_state("memory-1", "Running")
+    server = create_local_api_server(tmp_path, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        cancel = _json_request(
+            f"{base_url}/api/runs/active-run/cancel",
+            method="POST",
+            token=server.token,
+            payload={},
+        )
+
+        assert cancel["run"]["status"] == "cancel_requested"
+        assert cancel["state"] == "Cancelled"
+        assert local_items.fetch_items_by_ids(["memory-1"])[0].state == "Cancelled"
+        assert any(event["kind"] == "cancel_requested" for event in cancel["run"]["events"])
+        assert not any(event["kind"] == "cancelled" for event in cancel["run"]["events"])
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
 def test_local_api_exposes_work_item_parent_and_children(tmp_path: Path) -> None:
     store = RunStore(default_store_path(tmp_path))
     store.upsert_task_metadata(
@@ -595,6 +629,29 @@ def test_local_api_updates_work_item_settings(tmp_path: Path) -> None:
         assert result["settings"]["agent_task_mode"] == "agent_task_planner"
         assert result["metadata"]["role"] == "planner"
         assert result["metadata"]["depends_on"] == ["memory-0"]
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_local_api_plan_runs_with_planner_settings(tmp_path: Path) -> None:
+    _init_git_repo(tmp_path)
+    server = create_local_api_server(tmp_path, port=0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        result = _json_request(
+            f"{base_url}/api/work-items/memory-1/plan",
+            method="POST",
+            token=server.token,
+            payload={"fake": True},
+        )
+
+        assert result["dispatched"] is True
+        assert result["run"]["settings"]["automation_mode"] == "full_agent"
+        assert result["run"]["settings"]["agent_task_mode"] == "agent_task_planner"
+        assert result["run"]["settings"]["agent_role"] == "planner"
     finally:
         server.shutdown()
         thread.join(timeout=5)
@@ -1174,6 +1231,39 @@ def test_local_api_fleet_logs_reports_unlinked_plane_project(tmp_path: Path) -> 
         assert logs["runs"] == []
         assert logs["tasks"] == []
         assert "not linked" in logs["message"]
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_local_api_fleet_logs_uses_newest_run_for_task_latest_run(tmp_path: Path) -> None:
+    _init_git_repo(tmp_path)
+    store = RunStore(default_store_path(tmp_path))
+    store.upsert_task_metadata(
+        item_id="child-1",
+        source="agent-followup",
+        depth=1,
+        parent_item_id="parent-1",
+        parent_identifier="CF-1",
+        parent_run_id="parent-run",
+        created_by_run_id="parent-run",
+        role="worker",
+    )
+    store.upsert_run(run_id="run-1", item_id="child-1", identifier="CF-2", status="failed")
+    store.upsert_run(run_id="run-2", item_id="child-1", identifier="CF-2", status="human_review")
+    server = create_local_api_server(tmp_path, port=0)
+    project = server.registry.add_project(tmp_path)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        result = _json_request(
+            f"{base_url}/api/projects/{project.id}/fleet-logs",
+            token=server.token,
+        )
+
+        task = result["fleet_logs"]["tasks"][0]
+        assert task["latest_run"]["id"] == "run-2"
     finally:
         server.shutdown()
         thread.join(timeout=5)

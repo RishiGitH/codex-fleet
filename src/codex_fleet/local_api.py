@@ -744,7 +744,19 @@ class _Handler(BaseHTTPRequestHandler):
                         "agent_role": "planner",
                     },
                 )
-                result = _run_work_item(repo, item_id, fake=_bool_payload(payload, "fake", default=False), fake_succeed=True, settings=payload)
+                planner_settings = {
+                    **payload,
+                    "automation_mode": "full_agent",
+                    "agent_task_mode": "agent_task_planner",
+                    "agent_role": "planner",
+                }
+                result = _run_work_item(
+                    repo,
+                    item_id,
+                    fake=_bool_payload(payload, "fake", default=False),
+                    fake_succeed=True,
+                    settings=planner_settings,
+                )
             except (ProjectRegistryError, ValueError) as exc:
                 self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
                 return
@@ -1242,7 +1254,9 @@ def _fleet_logs_payload(repo: Path, project: LocalProject | None) -> dict[str, A
     store = RunStore(default_store_path(repo))
     runs = store.list_runs(limit=200)
     task_metadata = [metadata for parent_id in store.list_parent_item_ids_with_children() for metadata in store.list_child_task_metadata(parent_id)]
-    latest_by_item = {run.item_id: run for run in runs}
+    latest_by_item: dict[str, StoredRun] = {}
+    for run in runs:
+        latest_by_item.setdefault(run.item_id, run)
     return {
         "project": _project_payload(project) if project is not None else None,
         "repo": str(repo.expanduser().resolve()),
@@ -1734,11 +1748,7 @@ def _cancel_work_item(repo: Path, item_id: str) -> dict[str, Any]:
     store = RunStore(default_store_path(config.repo))
     latest = store.latest_run_for_item(item_id)
     if latest is not None:
-        store.update_run_status(latest.id, RunStatus.CANCEL_REQUESTED.value, error="Cancelled by local API.")
-        store.finish_claim(item_id, latest.id, "cancel_requested")
-        store.add_event(latest.id, "cancel_requested", {"state": WorkItemState.CANCELLED.value})
-        store.update_run_status(latest.id, RunStatus.CANCELLED.value, error="Cancelled by local API.")
-        store.add_event(latest.id, "cancelled", {"state": WorkItemState.CANCELLED.value})
+        _request_run_cancel(store, latest, item_state=WorkItemState.CANCELLED.value)
     tracker.create_comment(item_id, "codex-fleet cancelled this item from the local UI.")
     tracker.update_item_state(item_id, WorkItemState.CANCELLED.value)
     latest = store.latest_run_for_item(item_id)
@@ -1756,17 +1766,22 @@ def _cancel_run(repo: Path, run_id: str) -> dict[str, Any]:
     run = store.get_run(run_id)
     if run is None:
         raise ValueError(f"Run not found: {run_id}")
-    store.update_run_status(run.id, RunStatus.CANCEL_REQUESTED.value, error="Cancelled by local API.")
-    store.finish_claim(run.item_id, run.id, "cancel_requested")
-    store.add_event(run.id, "cancel_requested", {"state": WorkItemState.CANCELLED.value})
-    store.update_run_status(run.id, RunStatus.CANCELLED.value, error="Cancelled by local API.")
-    store.add_event(run.id, "cancelled", {"state": WorkItemState.CANCELLED.value})
+    _request_run_cancel(store, run, item_state=WorkItemState.CANCELLED.value)
     tracker = _build_local_api_tracker(config)
     tracker.create_comment(run.item_id, f"codex-fleet run `{run.id}` was cancelled from the local UI.")
     tracker.update_item_state(run.item_id, WorkItemState.CANCELLED.value)
     cancelled = store.get_run(run.id)
     assert cancelled is not None
     return {"ok": True, "run": _run_detail_payload(store, cancelled), "state": WorkItemState.CANCELLED.value}
+
+
+def _request_run_cancel(store: RunStore, run: StoredRun, *, item_state: str) -> None:
+    store.update_run_status(run.id, RunStatus.CANCEL_REQUESTED.value, error="Cancel requested from local API.")
+    store.finish_claim(run.item_id, run.id, "cancel_requested")
+    store.add_event(run.id, "cancel_requested", {"state": item_state})
+    if run.status not in _ACTIVE_RUN_STATUSES:
+        store.update_run_status(run.id, RunStatus.CANCELLED.value, error="Cancelled by local API.")
+        store.add_event(run.id, "cancelled", {"state": item_state})
 
 
 def _create_work_item(repo: Path, payload: dict[str, Any], *, settings: dict[str, Any] | None = None) -> WorkItem:
