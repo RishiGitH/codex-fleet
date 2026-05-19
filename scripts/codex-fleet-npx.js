@@ -71,7 +71,12 @@ if (!canImportCodexFleet()) {
   run(python, ['-m', 'pip', 'install', '-e', '.']);
 }
 if (shouldEnsurePlaywright(cliArgs)) {
-  ensurePlaywrightBrowsers();
+  const playwrightWarning = ensurePlaywrightBrowsers();
+  if (playwrightWarning) {
+    console.warn(
+      `codex-fleet: Playwright Chromium setup failed; startup will continue and browser proof may be recorded as a warning. ${playwrightWarning}`
+    );
+  }
 }
 run(python, ['-m', 'codex_fleet', ...cliArgs], { cwd: projectCwd });
 
@@ -81,9 +86,13 @@ function shouldEnsurePlaywright(args) {
 
 function ensurePlaywrightBrowsers() {
   const browsers = join(projectCwd, '.codex-fleet', 'tooling', 'playwright-browsers');
-  mkdirSync(browsers, { recursive: true });
-  const hasChromium = existsSync(browsers) && readdirSync(browsers).some((name) => name.startsWith('chromium'));
-  if (hasChromium) return;
+  try {
+    mkdirSync(browsers, { recursive: true });
+    const hasChromium = existsSync(browsers) && readdirSync(browsers).some((name) => name.startsWith('chromium'));
+    if (hasChromium) return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
   const result = spawnSync(python, ['-m', 'playwright', 'install', 'chromium'], {
     cwd: root,
     stdio: 'inherit',
@@ -91,10 +100,10 @@ function ensurePlaywrightBrowsers() {
     env: { ...pythonEnv(), PLAYWRIGHT_BROWSERS_PATH: browsers },
   });
   if (result.error) {
-    console.error(result.error.message);
-    process.exit(1);
+    return result.error.message;
   }
   if (result.status !== 0) {
-    process.exit(result.status || 1);
+    return `playwright install chromium exited with status ${result.status || 1}`;
   }
+  return null;
 }
